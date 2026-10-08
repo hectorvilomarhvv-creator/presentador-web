@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Presentador</title>
+<style>
+  :root { --azul:#1F3A5F; --acento:#2E86DE; --fondo:#F4F7FB; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",Calibri,sans-serif; background:var(--fondo); color:#222;
+         min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+  main { background:#fff; width:100%; max-width:560px; border-radius:16px; padding:32px;
+         box-shadow:0 8px 30px rgba(31,58,95,.12); }
+  h1 { margin:0 0 4px; color:var(--azul); font-size:28px; }
+  p.sub { margin:0 0 24px; color:#667; }
+  label { display:block; font-weight:600; margin:16px 0 6px; font-size:14px; }
+  input[type=text], input[type=number], select {
+    width:100%; padding:12px; border:1px solid #cdd6e3; border-radius:10px; font-size:16px; }
+  input:focus, select:focus { outline:2px solid var(--acento); border-color:transparent; }
+  .fila { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; }
+  .check { display:flex; align-items:center; gap:8px; margin-top:18px; font-size:14px; }
+  button { margin-top:24px; width:100%; padding:14px; border:0; border-radius:10px; font-size:17px;
+           font-weight:600; color:#fff; background:var(--acento); cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  #msg { margin-top:16px; min-height:22px; font-size:14px; }
+  .error { color:#b3261e; } .ok { color:#1b7a3d; }
+  .badge { display:inline-block; font-size:12px; padding:3px 10px; border-radius:20px; margin-top:6px;
+           background:#e6f0fb; color:var(--azul); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Presentador</h1>
+  <p class="sub">Escribe un tema y obtén una presentación de PowerPoint.</p>
+  <span class="badge">{{ "IA Gemini activa" if con_ia else "Modo Wikipedia (sin IA)" }}</span>
+
+  <form id="f">
+    {% if requiere_codigo %}
+    <label for="codigo">Código de acceso</label>
+    <input type="text" id="codigo" placeholder="El código que recibiste" autocomplete="off" required>
+    {% endif %}
+
+    <label for="tema">Tema</label>
+    <input type="text" id="tema" placeholder="Ej.: El sistema solar" required autofocus>
+
+    <div class="fila">
+      <div><label for="cantidad">Diapositivas</label>
+        <input type="number" id="cantidad" min="3" max="12" value="6"></div>
+      <div><label for="idioma">Idioma</label>
+        <select id="idioma"><option value="es">Español</option><option value="en">English</option></select></div>
+      <div><label for="color">Color</label>
+        <select id="color">{% for t in temas %}<option value="{{ t }}">{{ t|capitalize }}</option>{% endfor %}</select></div>
+    </div>
+
+    <label class="check"><input type="checkbox" id="imagenes" checked> Incluir imágenes (Wikimedia Commons)</label>
+    <label class="check"><input type="checkbox" id="notas" checked> Incluir notas del orador</label>
+    {% if es_windows %}
+    <label class="check"><input type="checkbox" id="abrir" checked> Abrir automáticamente en PowerPoint</label>
+    {% endif %}
+
+    <button id="btn" type="submit">Crear presentación</button>
+    <div id="msg"></div>
+  </form>
+</main>
+
+<script>
+const f = document.getElementById('f'), btn = document.getElementById('btn'), msg = document.getElementById('msg');
+const codigoGuardado = document.getElementById('codigo');
+if (codigoGuardado) { try { codigoGuardado.value = localStorage.getItem('codigo') || ''; } catch (_) {} }
+f.addEventListener('submit', async e => {
+  e.preventDefault();
+  btn.disabled = true; msg.className = ''; msg.textContent = 'Buscando y creando… con imágenes puede tardar unos segundos.';
+  try {
+    const abrirEl = document.getElementById('abrir');
+    const codigoEl = document.getElementById('codigo');
+    if (codigoEl) { try { localStorage.setItem('codigo', codigoEl.value); } catch (_) {} }
+    const r = await fetch('/generar', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Codigo': codigoEl ? codigoEl.value : ''},
+      body: JSON.stringify({
+        tema: document.getElementById('tema').value,
+        cantidad: document.getElementById('cantidad').value,
+        idioma: document.getElementById('idioma').value,
+        color: document.getElementById('color').value,
+        imagenes: document.getElementById('imagenes').checked,
+        notas: document.getElementById('notas').checked,
+        abrir: abrirEl ? abrirEl.checked : false
+      })
+    });
+    const tipo = r.headers.get('content-type') || '';
+    if (tipo.includes('application/json')) {
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Error');
+      msg.className = 'ok';
+      msg.textContent = `Listo: ${d.diapositivas} diapositivas abiertas en PowerPoint.` + (d.aviso ? ' ' + d.aviso : '');
+    } else {
+      if (!r.ok) throw new Error('Error al crear el archivo');
+      const blob = await r.blob();
+      const nombre = (r.headers.get('content-disposition') || '').match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = nombre ? decodeURIComponent(nombre[1]) : 'presentacion.pptx';
+      a.click();
+      msg.className = 'ok';
+      msg.textContent = 'Listo: presentación descargada. Ábrela con PowerPoint.' + (r.headers.get('X-Aviso') ? ' ' + r.headers.get('X-Aviso') : '');
+    }
+  } catch (err) {
+    msg.className = 'error'; msg.textContent = err.message;
+  } finally { btn.disabled = false; }
+});
+</script>
+</body>
+</html>
