@@ -401,9 +401,29 @@ def generar():
         resp.headers["X-Aviso"] = aviso.encode("latin-1", "ignore").decode("latin-1")
     return resp
 
-# Inicializar base de datos
+# Inicializar base de datos y crear admin automáticamente
 with app.app_context():
     db.create_all()
+    
+    # Crear usuario admin si no existe
+    from werkzeug.security import generate_password_hash
+    admin_user = User.query.filter_by(username='admin').first()
+    if not admin_user:
+        admin_user = User(
+            username='admin',
+            password_hash=generate_password_hash('admin123'),
+            is_admin=True
+        )
+        db.session.add(admin_user)
+        db.session.commit()
+        print("=" * 50)
+        print("✅ Usuario admin creado automáticamente")
+        print("👤 Usuario: admin")
+        print("🔑 Contraseña: admin123")
+        print("️ CAMBIA LA CONTRASEÑA DESPUÉS!")
+        print("=" * 50)
+    else:
+        print("✅ El usuario admin ya existe")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
