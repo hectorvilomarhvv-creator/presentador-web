@@ -289,18 +289,23 @@ def inicio():
 def salud():
     return "ok"
 
-@app.get("/login")
+# ✅ CORREGIDO: Ahora acepta GET y POST
+@app.route("/login", methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
         return redirect(url_for('inicio'))
+    
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
         user = User.query.filter_by(username=username).first()
+        
         if user and check_password_hash(user.password_hash, password):
             login_user(user)
             return redirect(url_for('inicio'))
-        flash('Usuario o contraseña incorrectos', 'error')
+        else:
+            flash('Usuario o contraseña incorrectos', 'error')
+    
     return render_template('login.html')
 
 @app.get("/logout")
@@ -331,7 +336,7 @@ def crear_usuario():
     return render_template('admin.html')
 
 @app.post("/generar")
-@login_required  # <--- AQUÍ SE PROTEGE LA GENERACIÓN
+@login_required
 def generar():
     if not registrar_uso(current_user):
         return jsonify(error=f"Llegaste al límite de {LIMITE_DIARIO} presentaciones por hoy. Vuelve mañana."), 429
@@ -406,7 +411,6 @@ with app.app_context():
     db.create_all()
     
     # Crear usuario admin si no existe
-    from werkzeug.security import generate_password_hash
     admin_user = User.query.filter_by(username='admin').first()
     if not admin_user:
         admin_user = User(
