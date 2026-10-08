@@ -2,3 +2,11 @@ flask>=3.0
 python-pptx>=1.0
 requests>=2.31
 gunicorn>=22.0; sys_platform != "win32"
+Flask
+requests
+Pillow
+python-pptx
+Flask-Login
+Flask-SQLAlchemy
+Werkzeug
+gunicorn

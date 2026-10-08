@@ -5,12 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Presentador</title>
 <style>
-  :root { --azul:#1F3A5F; --acento:#2E86DE; --fondo:#F4F7FB; }
+  :root { --azul:#1F3A5F; --acento:#2E86DE; --fondo:#F4F7FB; --verde:#2D9C6B; }
   * { box-sizing:border-box; }
   body { margin:0; font-family:"Segoe UI",Calibri,sans-serif; background:var(--fondo); color:#222;
          min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
   main { background:#fff; width:100%; max-width:560px; border-radius:16px; padding:32px;
-         box-shadow:0 8px 30px rgba(31,58,95,.12); }
+         box-shadow:0 8px 30px rgba(31,58,95,.12); position: relative; }
+  
+  /* NUEVO: Barra de usuario */
+  .user-bar {
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--azul); color: white; padding: 12px 20px;
+    border-radius: 16px 16px 0 0; margin: -32px -32px 24px -32px;
+    font-size: 14px;
+  }
+  .user-bar a { color: #a0c4ff; text-decoration: none; margin-left: 15px; font-weight: 600; transition: color 0.2s; }
+  .user-bar a:hover { color: white; text-decoration: underline; }
+  .user-bar .admin-link { color: #4ade80; }
+
   h1 { margin:0 0 4px; color:var(--azul); font-size:28px; }
   p.sub { margin:0 0 24px; color:#667; }
   label { display:block; font-weight:600; margin:16px 0 6px; font-size:14px; }
@@ -30,15 +42,23 @@
 </head>
 <body>
 <main>
+  <!-- NUEVO: Barra de información del usuario -->
+  <div class="user-bar">
+    <span>👤 Hola, <strong>{{ usuario.username }}</strong></span>
+    <div>
+      {% if usuario.is_admin %}
+        <a href="{{ url_for('crear_usuario') }}" class="admin-link">⚙️ Panel Admin</a>
+      {% endif %}
+      <a href="{{ url_for('logout') }}">Salir</a>
+    </div>
+  </div>
+
   <h1>Presentador</h1>
   <p class="sub">Escribe un tema y obtén una presentación de PowerPoint.</p>
   <span class="badge">{{ "IA Gemini activa" if con_ia else "Modo Wikipedia (sin IA)" }}</span>
 
   <form id="f">
-    {% if requiere_codigo %}
-    <label for="codigo">Código de acceso</label>
-    <input type="text" id="codigo" placeholder="El código que recibiste" autocomplete="off" required>
-    {% endif %}
+    <!-- ELIMINADO: El bloque de "Código de acceso" ya no es necesario -->
 
     <label for="tema">Tema</label>
     <input type="text" id="tema" placeholder="Ej.: El sistema solar" required autofocus>
@@ -65,18 +85,18 @@
 
 <script>
 const f = document.getElementById('f'), btn = document.getElementById('btn'), msg = document.getElementById('msg');
-const codigoGuardado = document.getElementById('codigo');
-if (codigoGuardado) { try { codigoGuardado.value = localStorage.getItem('codigo') || ''; } catch (_) {} }
+
 f.addEventListener('submit', async e => {
   e.preventDefault();
   btn.disabled = true; msg.className = ''; msg.textContent = 'Buscando y creando… con imágenes puede tardar unos segundos.';
   try {
     const abrirEl = document.getElementById('abrir');
-    const codigoEl = document.getElementById('codigo');
-    if (codigoEl) { try { localStorage.setItem('codigo', codigoEl.value); } catch (_) {} }
+    
+    // ELIMINADO: Lógica del código de acceso
+    
     const r = await fetch('/generar', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Codigo': codigoEl ? codigoEl.value : ''},
+      headers: {'Content-Type': 'application/json'}, // Ya no enviamos X-Codigo
       body: JSON.stringify({
         tema: document.getElementById('tema').value,
         cantidad: document.getElementById('cantidad').value,
@@ -87,6 +107,7 @@ f.addEventListener('submit', async e => {
         abrir: abrirEl ? abrirEl.checked : false
       })
     });
+    
     const tipo = r.headers.get('content-type') || '';
     if (tipo.includes('application/json')) {
       const d = await r.json();
