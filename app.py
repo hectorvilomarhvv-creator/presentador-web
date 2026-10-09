@@ -1,5 +1,5 @@
-"""Presentador: busca un tema y crea una presentación de PowerPoint (.pptx).
-Con sistema de Login, Administración de Usuarios y Búsqueda Híbrida (DDG + Wiki).
+"""Presentador: busca un tema, crea PPTX y agrega videos de YouTube.
+Sin API Keys externas. Sistema de Login + Búsqueda Híbrida + Videos.
 """
 import html
 import io
@@ -9,6 +9,7 @@ import platform
 import re
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 
 import requests
@@ -56,15 +57,12 @@ def load_user(user_id):
     return User.query.get(int(user_id))
 
 def registrar_uso(usuario):
-    """Cuenta una presentación para el usuario logueado."""
     hoy = time.strftime("%Y-%m-%d")
     if usuario.fecha_ultimo_uso != hoy:
         usuario.uso_diario = 0
         usuario.fecha_ultimo_uso = hoy
-    
     if usuario.uso_diario >= LIMITE_DIARIO:
         return False
-    
     usuario.uso_diario += 1
     db.session.commit()
     return True
@@ -78,37 +76,26 @@ TEMAS = {
 
 # ----------------------------------------------------------------- búsqueda híbrida
 def buscar_duckduckgo(tema, idioma="es"):
-    """Busca información moderna usando DuckDuckGo Instant Answers (Sin API Key)."""
     try:
-        # Traducir parámetro de idioma si es necesario para DDG (aunque DDG detecta auto)
-        q = f"{tema}" 
-        url = f"https://api.duckduckgo.com/?q={q}&format=json&no_html=1&skip_disambig=1"
-        
+        url = f"https://api.duckduckgo.com/?q={tema}&format=json&no_html=1&skip_disambig=1"
         r = requests.get(url, headers={"User-Agent": "PresentadorBot/1.0"}, timeout=10)
         r.raise_for_status()
         data = r.json()
-        
         resumen = data.get("AbstractText", "")
         url_fuente = data.get("AbstractURL", "")
-        
-        # Si no hay resumen directo, intentar con RelatedTopics
         if not resumen and data.get("RelatedTopics"):
             primer_tema = data["RelatedTopics"][0]
             if "Text" in primer_tema:
                 resumen = primer_tema["Text"]
                 if "FirstURL" in primer_tema:
                     url_fuente = primer_tema["FirstURL"]
-
-        if resumen and len(resumen) > 50: # Solo retornar si hay contenido sustancial
+        if resumen and len(resumen) > 50:
             return tema, resumen.replace("\n", " ").strip(), url_fuente
-            
     except Exception as e:
         print(f"Error en DuckDuckGo: {e}")
-        
     return None
 
 def buscar_wikipedia(tema, idioma="es"):
-    """Busca información enciclopédica en Wikipedia."""
     base = f"https://{idioma}.wikipedia.org/w/api.php"
     try:
         r = requests.get(base, params={"action": "query", "list": "search", "srsearch": tema, "srlimit": 1, "format": "json"}, headers=HEADERS, timeout=15)
@@ -126,11 +113,44 @@ def buscar_wikipedia(tema, idioma="es"):
     except requests.RequestException:
         return None
 
+def buscar_videos_youtube(tema, max_results=3):
+    """Busca videos en YouTube vía RSS público (Sin API Key)."""
+    try:
+        # Usamos el feed RSS de búsqueda de YouTube
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?search_query={requests.utils.quote(tema)}"
+        r = requests.get(rss_url, headers={"User-Agent": "PresentadorBot/1.0"}, timeout=10)
+        
+        if r.status_code != 200 or len(r.content) < 100:
+            return []
+            
+        root = ET.fromstring(r.content)
+        ns = {'atom': 'http://www.w3.org/2005/Atom'}
+        
+        videos = []
+        for entry in root.findall('atom:entry', ns)[:max_results]:
+            title_elem = entry.find('atom:title', ns)
+            link_elem = entry.find('atom:link', ns)
+            
+            if title_elem is not None and link_elem is not None:
+                title = title_elem.text
+                href = link_elem.get('href', '')
+                video_id = href.split('v=')[1].split('&')[0] if 'v=' in href else None
+                
+                if video_id:
+                    videos.append({
+                        'titulo': title,
+                        'url': f"https://www.youtube.com/watch?v={video_id}",
+                        'id': video_id
+                    })
+        return videos
+    except Exception as e:
+        print(f"Error buscando videos YT: {e}")
+        return []
+
 def _limpiar_html(texto):
     return re.sub(r"<[^>]+>", "", html.unescape(texto or "")).strip()
 
 def buscar_imagen(consulta, usadas):
-    """Busca imágenes en Wikimedia Commons (Libres de derechos)."""
     try:
         r = requests.get("https://commons.wikimedia.org/w/api.php", params={"action": "query", "generator": "search", "gsrsearch": consulta, "gsrnamespace": 6, "gsrlimit": 10, "prop": "imageinfo", "iiprop": "url|mime|size|extmetadata", "iiurlwidth": 900, "format": "json"}, headers=HEADERS, timeout=10)
         r.raise_for_status()
@@ -138,16 +158,12 @@ def buscar_imagen(consulta, usadas):
         for p in sorted(paginas.values(), key=lambda p: p.get("index", 0)):
             info = (p.get("imageinfo") or [{}])[0]
             titulo_img = p.get("title", "")
-            if info.get("mime") not in ("image/jpeg", "image/png"):
-                continue
-            if info.get("width", 0) < 500 or titulo_img in usadas:
-                continue
-            if re.search(r"logo|icon|flag|signature", titulo_img, re.I):
-                continue
+            if info.get("mime") not in ("image/jpeg", "image/png"): continue
+            if info.get("width", 0) < 500 or titulo_img in usadas: continue
+            if re.search(r"logo|icon|flag|signature", titulo_img, re.I): continue
             img = requests.get(info.get("thumburl") or info["url"], headers=HEADERS, timeout=15)
             img.raise_for_status()
-            if len(img.content) > 4_000_000:
-                continue
+            if len(img.content) > 4_000_000: continue
             meta = info.get("extmetadata", {})
             autor = _limpiar_html(meta.get("Artist", {}).get("value"))[:60]
             licencia = _limpiar_html(meta.get("LicenseShortName", {}).get("value"))
@@ -166,8 +182,7 @@ def oraciones(texto):
 def diapositivas_desde_texto(titulo, texto, cantidad):
     texto = re.split(r"\n(?:Véase también|Referencias|Enlaces externos|See also|References)\b", texto)[0]
     oraciones_ok = oraciones(texto)
-    if not oraciones_ok:
-        return []
+    if not oraciones_ok: return []
     por_slide = 4
     total = min(cantidad, max(1, len(oraciones_ok) // por_slide))
     paso = max(1, len(oraciones_ok) // total)
@@ -235,7 +250,7 @@ def _notas(slide, texto):
     if texto:
         slide.notes_slide.notes_text_frame.text = texto
 
-def crear_pptx(titulo, slides, fuente_url, tema_color, portada=None, con_notas=True):
+def crear_pptx(titulo, slides, fuente_url, tema_color, portada=None, con_notas=True, videos=None):
     oscuro, acento, claro = TEMAS.get(tema_color, TEMAS["azul"])
     prs = Presentation()
     prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
@@ -243,6 +258,7 @@ def crear_pptx(titulo, slides, fuente_url, tema_color, portada=None, con_notas=T
     vacio = prs.slide_layouts[6]
     creditos = []
 
+    # Portada
     s = prs.slides.add_slide(vacio)
     _rect(s, 0, 0, W, H, oscuro)
     ancho_titulo = Inches(7.2) if portada else Inches(11.5)
@@ -255,6 +271,7 @@ def crear_pptx(titulo, slides, fuente_url, tema_color, portada=None, con_notas=T
     if con_notas:
         _notas(s, f"Presentación sobre {titulo}. Fuente principal: {fuente_url}")
 
+    # Contenido
     for n, d in enumerate(slides, start=1):
         s = prs.slides.add_slide(vacio)
         _rect(s, 0, 0, W, H, claro)
@@ -286,6 +303,33 @@ def crear_pptx(titulo, slides, fuente_url, tema_color, portada=None, con_notas=T
         if con_notas:
             _notas(s, d.get("notas", ""))
 
+    # Diapositiva de Videos (NUEVO)
+    if videos:
+        s_vid = prs.slides.add_slide(vacio)
+        _rect(s_vid, 0, 0, W, H, oscuro)
+        _texto(s_vid, Inches(0.8), Inches(0.6), Inches(11.5), Inches(0.9), "📺 Videos Recomendados", 36, "FFFFFF", bold=True)
+        _texto(s_vid, Inches(0.8), Inches(1.6), Inches(11.5), Inches(0.5), "Haz clic en los enlaces para ver más sobre este tema:", 18, "C9D6E8")
+        
+        y_pos = Inches(2.4)
+        for v in videos:
+            # Crear enlace clickable
+            caja_link = s_vid.shapes.add_textbox(Inches(0.8), y_pos, Inches(11.5), Inches(0.6))
+            tf_link = caja_link.text_frame
+            tf_link.word_wrap = True
+            p_link = tf_link.paragraphs[0]
+            run_link = p_link.add_run()
+            run_link.text = f"▶ {v['titulo']}"
+            run_link.font.size = Pt(16)
+            run_link.font.color.rgb = _rgb("2E86DE") # Azul brillante
+            run_link.font.bold = True
+            
+            # Agregar hyperlink al texto
+            hlink = run_link.hyperlink
+            hlink.address = v['url']
+            
+            y_pos += Inches(0.9)
+
+    # Fuentes y créditos
     s = prs.slides.add_slide(vacio)
     _rect(s, 0, 0, W, H, oscuro)
     _texto(s, Inches(0.8), Inches(0.6), Inches(11.5), Inches(0.9), "Fuentes", 36, "FFFFFF", bold=True)
@@ -327,18 +371,15 @@ def salud():
 def login():
     if current_user.is_authenticated:
         return redirect(url_for('inicio'))
-    
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
         user = User.query.filter_by(username=username).first()
-        
         if user and check_password_hash(user.password_hash, password):
             login_user(user)
             return redirect(url_for('inicio'))
         else:
             flash('Usuario o contraseña incorrectos', 'error')
-    
     return render_template('login.html')
 
 @app.get("/logout")
@@ -353,12 +394,10 @@ def crear_usuario():
     if not current_user.is_admin:
         flash('No tienes permisos de administrador', 'error')
         return redirect(url_for('inicio'))
-    
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
         is_admin = request.form.get('is_admin') == 'on'
-        
         if User.query.filter_by(username=username).first():
             flash('El usuario ya existe', 'error')
         else:
@@ -391,11 +430,8 @@ def generar():
         return jsonify(error="Escribe un tema."), 400
 
     # LÓGICA DE BÚSQUEDA HÍBRIDA
-    # 1. Intentar DuckDuckGo primero (Información moderna/actual)
     encontrado = buscar_duckduckgo(tema, idioma)
     fuente_actual = "DuckDuckGo (Web Actual)"
-    
-    # 2. Si DDG no trajo nada sustancial, caer a Wikipedia (Información base/histórica)
     if not encontrado:
         encontrado = buscar_wikipedia(tema, idioma)
         fuente_actual = "Wikipedia"
@@ -404,6 +440,9 @@ def generar():
         return jsonify(error="No encontré información suficiente sobre ese tema en ninguna fuente."), 404
         
     titulo, texto, url = encontrado
+
+    # BUSCAR VIDEOS DE YOUTUBE (Nuevo)
+    videos = buscar_videos_youtube(tema, max_results=3)
 
     slides, avisos = [], []
     if GEMINI_API_KEY:
@@ -431,7 +470,8 @@ def generar():
             avisos.append(f"No encontré imagen para {sin_imagen} diapositiva(s).")
     aviso = " ".join(avisos) or None
 
-    archivo = crear_pptx(titulo, slides, url, color, portada=portada, con_notas=con_notas)
+    # Pasar videos a la función de creación
+    archivo = crear_pptx(titulo, slides, url, color, portada=portada, con_notas=con_notas, videos=videos)
     nombre = nombre_seguro(titulo) + ".pptx"
 
     if abrir and platform.system() == "Windows" and request.remote_addr in ("127.0.0.1", "::1"):
@@ -449,15 +489,9 @@ def generar():
 # Inicializar base de datos y crear admin automáticamente
 with app.app_context():
     db.create_all()
-    
-    # Crear usuario admin si no existe
     admin_user = User.query.filter_by(username='admin').first()
     if not admin_user:
-        admin_user = User(
-            username='admin',
-            password_hash=generate_password_hash('admin123'),
-            is_admin=True
-        )
+        admin_user = User(username='admin', password_hash=generate_password_hash('admin123'), is_admin=True)
         db.session.add(admin_user)
         db.session.commit()
         print("=" * 50)
