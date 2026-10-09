@@ -1,7 +1,6 @@
 """Presentador: busca un tema y crea una presentación de PowerPoint (.pptx).
-Con sistema de Login y Administración de Usuarios.
+Con sistema de Login, Administración de Usuarios y Búsqueda Híbrida (DDG + Wiki).
 """
-import hmac
 import html
 import io
 import json
@@ -77,38 +76,73 @@ TEMAS = {
     "morado": ("3B2A5E", "7E57C2", "F6F3FB"),
 }
 
-# ----------------------------------------------------------------- búsqueda
+# ----------------------------------------------------------------- búsqueda híbrida
+def buscar_duckduckgo(tema, idioma="es"):
+    """Busca información moderna usando DuckDuckGo Instant Answers (Sin API Key)."""
+    try:
+        # Traducir parámetro de idioma si es necesario para DDG (aunque DDG detecta auto)
+        q = f"{tema}" 
+        url = f"https://api.duckduckgo.com/?q={q}&format=json&no_html=1&skip_disambig=1"
+        
+        r = requests.get(url, headers={"User-Agent": "PresentadorBot/1.0"}, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        
+        resumen = data.get("AbstractText", "")
+        url_fuente = data.get("AbstractURL", "")
+        
+        # Si no hay resumen directo, intentar con RelatedTopics
+        if not resumen and data.get("RelatedTopics"):
+            primer_tema = data["RelatedTopics"][0]
+            if "Text" in primer_tema:
+                resumen = primer_tema["Text"]
+                if "FirstURL" in primer_tema:
+                    url_fuente = primer_tema["FirstURL"]
+
+        if resumen and len(resumen) > 50: # Solo retornar si hay contenido sustancial
+            return tema, resumen.replace("\n", " ").strip(), url_fuente
+            
+    except Exception as e:
+        print(f"Error en DuckDuckGo: {e}")
+        
+    return None
+
 def buscar_wikipedia(tema, idioma="es"):
+    """Busca información enciclopédica en Wikipedia."""
     base = f"https://{idioma}.wikipedia.org/w/api.php"
-    r = requests.get(base, params={"action": "query", "list": "search", "srsearch": tema, "srlimit": 1, "format": "json"}, headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    resultados = r.json().get("query", {}).get("search", [])
-    if not resultados:
+    try:
+        r = requests.get(base, params={"action": "query", "list": "search", "srsearch": tema, "srlimit": 1, "format": "json"}, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        resultados = r.json().get("query", {}).get("search", [])
+        if not resultados:
+            return None
+        titulo = resultados[0]["title"]
+        r = requests.get(base, params={"action": "query", "prop": "extracts", "explaintext": 1, "exsectionformat": "plain", "titles": titulo, "format": "json", "redirects": 1}, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        paginas = r.json().get("query", {}).get("pages", {})
+        texto = next(iter(paginas.values())).get("extract", "")
+        url = f"https://{idioma}.wikipedia.org/wiki/{titulo.replace(' ', '_')}"
+        return titulo, texto, url
+    except requests.RequestException:
         return None
-    titulo = resultados[0]["title"]
-    r = requests.get(base, params={"action": "query", "prop": "extracts", "explaintext": 1, "exsectionformat": "plain", "titles": titulo, "format": "json", "redirects": 1}, headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    paginas = r.json().get("query", {}).get("pages", {})
-    texto = next(iter(paginas.values())).get("extract", "")
-    url = f"https://{idioma}.wikipedia.org/wiki/{titulo.replace(' ', '_')}"
-    return titulo, texto, url
 
 def _limpiar_html(texto):
     return re.sub(r"<[^>]+>", "", html.unescape(texto or "")).strip()
 
 def buscar_imagen(consulta, usadas):
+    """Busca imágenes en Wikimedia Commons (Libres de derechos)."""
     try:
         r = requests.get("https://commons.wikimedia.org/w/api.php", params={"action": "query", "generator": "search", "gsrsearch": consulta, "gsrnamespace": 6, "gsrlimit": 10, "prop": "imageinfo", "iiprop": "url|mime|size|extmetadata", "iiurlwidth": 900, "format": "json"}, headers=HEADERS, timeout=10)
         r.raise_for_status()
         paginas = r.json().get("query", {}).get("pages", {})
         for p in sorted(paginas.values(), key=lambda p: p.get("index", 0)):
             info = (p.get("imageinfo") or [{}])[0]
-            titulo = p.get("title", "")
+            titulo_img = p.get("title", "")
             if info.get("mime") not in ("image/jpeg", "image/png"):
                 continue
-            if info.get("width", 0) < 500 or titulo in usadas:
+            if info.get("width", 0) < 500 or titulo_img in usadas:
                 continue
-            if re.search(r"logo|icon|flag|signature", titulo, re.I):
+            if re.search(r"logo|icon|flag|signature", titulo_img, re.I):
                 continue
             img = requests.get(info.get("thumburl") or info["url"], headers=HEADERS, timeout=15)
             img.raise_for_status()
@@ -117,8 +151,8 @@ def buscar_imagen(consulta, usadas):
             meta = info.get("extmetadata", {})
             autor = _limpiar_html(meta.get("Artist", {}).get("value"))[:60]
             licencia = _limpiar_html(meta.get("LicenseShortName", {}).get("value"))
-            usadas.add(titulo)
-            credito = (f'{titulo.replace("File:", "")} — {autor or "autor no indicado"} ({licencia or "ver Wikimedia Commons"})')
+            usadas.add(titulo_img)
+            credito = (f'{titulo_img.replace("File:", "")} — {autor or "autor no indicado"} ({licencia or "ver Wikimedia Commons"})')
             return {"datos": img.content, "credito": credito}
     except Exception:
         return None
@@ -289,7 +323,6 @@ def inicio():
 def salud():
     return "ok"
 
-# ✅ CORREGIDO: Ahora acepta GET y POST
 @app.route("/login", methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
@@ -357,12 +390,19 @@ def generar():
     if not tema:
         return jsonify(error="Escribe un tema."), 400
 
-    try:
-        encontrado = buscar_wikipedia(tema, idioma)
-    except requests.RequestException as e:
-        return jsonify(error=f"No pude conectar con Wikipedia: {e}"), 502
+    # LÓGICA DE BÚSQUEDA HÍBRIDA
+    # 1. Intentar DuckDuckGo primero (Información moderna/actual)
+    encontrado = buscar_duckduckgo(tema, idioma)
+    fuente_actual = "DuckDuckGo (Web Actual)"
+    
+    # 2. Si DDG no trajo nada sustancial, caer a Wikipedia (Información base/histórica)
     if not encontrado:
-        return jsonify(error="No encontré información sobre ese tema."), 404
+        encontrado = buscar_wikipedia(tema, idioma)
+        fuente_actual = "Wikipedia"
+
+    if not encontrado:
+        return jsonify(error="No encontré información suficiente sobre ese tema en ninguna fuente."), 404
+        
     titulo, texto, url = encontrado
 
     slides, avisos = [], []
@@ -370,7 +410,7 @@ def generar():
         try:
             slides = diapositivas_con_gemini(titulo, texto, cantidad, idioma)
         except Exception as e:
-            avisos.append(f"La IA no respondió ({type(e).__name__}); usé solo Wikipedia.")
+            avisos.append(f"La IA no respondió ({type(e).__name__}); usé solo {fuente_actual}.")
     if not slides:
         slides = diapositivas_desde_texto(titulo, texto, cantidad)
     if not slides:
@@ -422,9 +462,7 @@ with app.app_context():
         db.session.commit()
         print("=" * 50)
         print("✅ Usuario admin creado automáticamente")
-        print("👤 Usuario: admin")
-        print("🔑 Contraseña: admin123")
-        print("️ CAMBIA LA CONTRASEÑA DESPUÉS!")
+        print("👤 Usuario: admin | 🔑 Contraseña: admin123")
         print("=" * 50)
     else:
         print("✅ El usuario admin ya existe")
