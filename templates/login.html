@@ -7,7 +7,7 @@
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #f4f6f9;
+            background-color: #e2e8f0;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -16,41 +16,40 @@
         }
 
         .login-card {
-            background: white;
+            background-color: #0f172a; /* Azul empresarial oscuro */
             padding: 50px 40px;
-            border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
             width: 100%;
-            max-width: 400px;
+            max-width: 420px;
             text-align: center;
+            border: 1px solid #1e293b;
         }
 
-        /* Estilo para el Logo */
         .logo-img {
-            max-width: 180px; /* Tamaño del logo */
+            max-width: 180px;
             height: auto;
-            margin-bottom: 10px;
+            margin-bottom: 15px;
             display: block;
             margin-left: auto;
             margin-right: auto;
         }
 
         h2 {
-            color: #1a1a1a;
+            color: #ffffff;
             margin: 0;
             font-size: 32px;
             font-weight: 800;
             letter-spacing: 1px;
         }
 
-        /* AQUÍ ESTÁ EL CAMBIO: Negro fuerte y más grande */
         .subtitle {
-            color: #000000; /* Negro puro */
-            font-size: 20px; /* Más grande */
-            font-weight: 900; /* Muy grueso (Bold) */
+            color: #D4AF37; /* Dorado */
+            font-size: 18px;
+            font-weight: 700;
             margin-bottom: 30px;
             text-transform: uppercase;
-            letter-spacing: 2px;
+            letter-spacing: 3px;
         }
 
         .form-group {
@@ -62,66 +61,83 @@
         input[type="password"] {
             width: 100%;
             padding: 15px;
-            border: 1px solid #ddd;
+            border: 1px solid #334155;
             border-radius: 8px;
             font-size: 16px;
             box-sizing: border-box;
-            background-color: #f9f9f9;
+            background-color: #1e293b;
+            color: #ffffff;
+            transition: all 0.3s ease;
+        }
+
+        input::placeholder {
+            color: #94a3b8;
         }
 
         input:focus {
             outline: none;
-            border-color: #D4AF37; /* Borde dorado al escribir */
-            background-color: #fff;
+            border-color: #D4AF37;
+            background-color: #0f172a;
+            box-shadow: 0 0 0 3px rgba(212, 175, 55, 0.2);
         }
 
         .contact-info {
-            background-color: #fff8e1;
-            border: 1px solid #ffe082;
-            color: #333;
+            background-color: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(212, 175, 55, 0.3);
+            color: #cbd5e1;
             padding: 15px;
             border-radius: 8px;
-            font-size: 15px;
+            font-size: 14px;
             margin-bottom: 25px;
-            line-height: 1.4;
+            line-height: 1.5;
         }
 
         .contact-info strong {
-            color: #000;
+            color: #ffffff;
             font-size: 16px;
+            display: block;
+            margin-top: 5px;
         }
 
+        /* --- AQUÍ ESTÁ EL CAMBIO DEL BOTÓN --- */
         button {
             width: 100%;
-            padding: 15px;
-            background: linear-gradient(135deg, #D4AF37 0%, #B8860B 100%);
-            color: white;
+            padding: 16px;
+            background-color: #ffffff; /* Fondo Blanco */
+            color: #0f172a; /* Texto Azul Oscuro */
             border: none;
             border-radius: 8px;
             font-size: 18px;
-            font-weight: bold;
+            font-weight: 800;
             cursor: pointer;
-            transition: opacity 0.3s;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
 
         button:hover {
-            opacity: 0.9;
+            background-color: #f1f5f9; /* Blanco un poco más gris al pasar el mouse */
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(255, 255, 255, 0.15);
         }
+        /* ------------------------------------- */
 
         .error-msg {
-            color: #d32f2f;
-            background-color: #ffebee;
+            color: #fca5a5;
+            background-color: rgba(220, 38, 38, 0.2);
             padding: 10px;
             border-radius: 6px;
             margin-bottom: 20px;
             font-size: 14px;
+            border: 1px solid rgba(220, 38, 38, 0.5);
         }
     </style>
 </head>
 <body>
 
     <div class="login-card">
-        <!-- LOGO: Asegúrate de que la imagen se llame 'logo.png' y esté en la carpeta 'static' -->
+        <!-- LOGO -->
         <img src="{{ url_for('static', filename='logo.png') }}" alt="PLANI Logo" class="logo-img">
 
         <!-- TÍTULOS -->
@@ -148,7 +164,7 @@
 
             <!-- CONTACTO -->
             <div class="contact-info">
-                Contacta para tu cuenta al<br>
+                Contacta para tu cuenta al
                 <strong>TEL: 809-446-6921</strong>
             </div>
 
