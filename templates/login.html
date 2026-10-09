@@ -5,15 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - PLANI Presentaciones</title>
     <style>
-        :root {
-            --gold: #D4AF37; /* Color dorado similar al logo */
-            --dark: #1a1a1a;
-            --light: #f9f9f9;
-        }
-
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: var(--light);
+            background-color: #f4f6f9;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -23,34 +17,37 @@
 
         .login-card {
             background: white;
-            padding: 40px;
-            border-radius: 15px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            padding: 50px 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
             width: 100%;
             max-width: 400px;
             text-align: center;
         }
 
-        .logo-container {
-            margin-bottom: 20px;
-        }
-
+        /* Estilo para el Logo */
         .logo-img {
-            max-width: 150px; /* Ajusta el tamaño del logo aquí */
+            max-width: 180px; /* Tamaño del logo */
             height: auto;
+            margin-bottom: 10px;
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
         }
 
         h2 {
-            color: var(--dark);
-            margin: 0 0 5px 0;
-            font-size: 24px;
+            color: #1a1a1a;
+            margin: 0;
+            font-size: 32px;
+            font-weight: 800;
             letter-spacing: 1px;
-            font-weight: 700;
         }
 
+        /* AQUÍ ESTÁ EL CAMBIO: Negro fuerte y más grande */
         .subtitle {
-            color: #666;
-            font-size: 14px;
+            color: #000000; /* Negro puro */
+            font-size: 20px; /* Más grande */
+            font-weight: 900; /* Muy grueso (Bold) */
             margin-bottom: 30px;
             text-transform: uppercase;
             letter-spacing: 2px;
@@ -61,67 +58,59 @@
             text-align: left;
         }
 
-        label {
-            display: block;
-            margin-bottom: 8px;
-            color: #333;
-            font-weight: 600;
-            font-size: 14px;
-        }
-
         input[type="text"], 
         input[type="password"] {
             width: 100%;
-            padding: 12px;
+            padding: 15px;
             border: 1px solid #ddd;
             border-radius: 8px;
             font-size: 16px;
             box-sizing: border-box;
-            transition: border-color 0.3s;
+            background-color: #f9f9f9;
         }
 
         input:focus {
             outline: none;
-            border-color: var(--gold);
-            box-shadow: 0 0 0 3px rgba(212, 175, 55, 0.2);
+            border-color: #D4AF37; /* Borde dorado al escribir */
+            background-color: #fff;
         }
 
         .contact-info {
-            background-color: #fff8e1; /* Fondo amarillo muy suave */
+            background-color: #fff8e1;
             border: 1px solid #ffe082;
-            color: #5d4037;
-            padding: 12px;
+            color: #333;
+            padding: 15px;
             border-radius: 8px;
-            font-size: 14px;
-            margin-bottom: 20px;
-            line-height: 1.5;
+            font-size: 15px;
+            margin-bottom: 25px;
+            line-height: 1.4;
         }
 
         .contact-info strong {
-            color: var(--dark);
+            color: #000;
+            font-size: 16px;
         }
 
         button {
             width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #D4AF37 0%, #B8860B 100%); /* Gradiente dorado */
+            padding: 15px;
+            background: linear-gradient(135deg, #D4AF37 0%, #B8860B 100%);
             color: white;
             border: none;
             border-radius: 8px;
-            font-size: 16px;
+            font-size: 18px;
             font-weight: bold;
             cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
+            transition: opacity 0.3s;
         }
 
         button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(212, 175, 55, 0.4);
+            opacity: 0.9;
         }
 
         .error-msg {
-            color: #e74c3c;
-            background-color: #fadbd8;
+            color: #d32f2f;
+            background-color: #ffebee;
             padding: 10px;
             border-radius: 6px;
             margin-bottom: 20px;
@@ -132,17 +121,14 @@
 <body>
 
     <div class="login-card">
-        <!-- Logo -->
-        <div class="logo-container">
-            <!-- NOTA: Asegúrate de guardar la imagen del logo como 'logo.png' en la carpeta 'static' -->
-            <img src="{{ url_for('static', filename='logo.png') }}" alt="PLANI Logo" class="logo-img">
-        </div>
+        <!-- LOGO: Asegúrate de que la imagen se llame 'logo.png' y esté en la carpeta 'static' -->
+        <img src="{{ url_for('static', filename='logo.png') }}" alt="PLANI Logo" class="logo-img">
 
-        <!-- Título -->
+        <!-- TÍTULOS -->
         <h2>PLANI</h2>
         <div class="subtitle">PRESENTACIONES</div>
 
-        <!-- Mensajes de error (Flash messages) -->
+        <!-- Mensajes de error -->
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
@@ -153,22 +139,20 @@
 
         <form method="POST">
             <div class="form-group">
-                <label for="username">Usuario</label>
-                <input type="text" id="username" name="username" placeholder="Ingresa tu usuario" required autofocus>
+                <input type="text" name="username" placeholder="Usuario" required autofocus>
             </div>
 
             <div class="form-group">
-                <label for="password">Contraseña</label>
-                <input type="password" id="password" name="password" placeholder="••••••••" required>
+                <input type="password" name="password" placeholder="Contraseña" required>
             </div>
 
-            <!-- Información de Contacto -->
+            <!-- CONTACTO -->
             <div class="contact-info">
                 Contacta para tu cuenta al<br>
                 <strong>TEL: 809-446-6921</strong>
             </div>
 
-            <button type="submit">Iniciar Sesión</button>
+            <button type="submit">Entrar</button>
         </form>
     </div>
 
