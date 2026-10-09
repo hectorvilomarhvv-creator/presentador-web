@@ -135,7 +135,7 @@
         <!-- Logo -->
         <div class="logo-container">
             <!-- NOTA: Asegúrate de guardar la imagen del logo como 'logo.png' en la carpeta 'static' -->
-            <img src="{{ url_for('static', filename='logo.png') }}" alt="PLANI Logo" class="logo-img">
+           <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/5/51/Google.png/640px-Google.png" alt="Logo Prueba" style="width:150px;">
         </div>
 
         <!-- Título -->
