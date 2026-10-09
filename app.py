@@ -320,27 +320,37 @@ def crear_pptx(titulo, slides, fuente_url, tema_color, portada=None, con_notas=T
         if con_notas:
             _notas(s, d.get("notas", ""))
 
-    # Diapositiva de Videos (NUEVO)
+    # Diapositiva de Videos (CORREGIDO - URLs Visibles)
     if videos:
         s_vid = prs.slides.add_slide(vacio)
         _rect(s_vid, 0, 0, W, H, oscuro)
         _texto(s_vid, Inches(0.8), Inches(0.6), Inches(11.5), Inches(0.9), "📺 Videos Recomendados", 36, "FFFFFF", bold=True)
-        _texto(s_vid, Inches(0.8), Inches(1.6), Inches(11.5), Inches(0.5), "Haz clic en los enlaces para ver más sobre este tema:", 18, "C9D6E8")
+        _texto(s_vid, Inches(0.8), Inches(1.6), Inches(11.5), Inches(0.5), "Copia estos enlaces para ver más sobre el tema:", 18, "C9D6E8")
         
         y_pos = Inches(2.4)
-        for v in videos:
-            caja_link = s_vid.shapes.add_textbox(Inches(0.8), y_pos, Inches(11.5), Inches(0.6))
-            tf_link = caja_link.text_frame
-            tf_link.word_wrap = True
-            p_link = tf_link.paragraphs[0]
-            run_link = p_link.add_run()
-            run_link.text = f"▶ {v['titulo']}"
-            run_link.font.size = Pt(16)
-            run_link.font.color.rgb = _rgb("2E86DE")
-            run_link.font.bold = True
+        for i, v in enumerate(videos, 1):
+            # Título del video
+            caja_titulo = s_vid.shapes.add_textbox(Inches(0.8), y_pos, Inches(11.5), Inches(0.5))
+            tf_titulo = caja_titulo.text_frame
+            tf_titulo.word_wrap = True
+            p_titulo = tf_titulo.paragraphs[0]
+            run_titulo = p_titulo.add_run()
+            run_titulo.text = f"{i}. {v['titulo']}"
+            run_titulo.font.size = Pt(16)
+            run_titulo.font.color.rgb = _rgb("FFFFFF")
+            run_titulo.font.bold = True
             
-            hlink = run_link.hyperlink
-            hlink.address = v['url']
+            # URL visible y clickable (formato corto)
+            y_pos += Inches(0.55)
+            caja_url = s_vid.shapes.add_textbox(Inches(1.2), y_pos, Inches(11.1), Inches(0.4))
+            tf_url = caja_url.text_frame
+            tf_url.word_wrap = True
+            p_url = tf_url.paragraphs[0]
+            run_url = p_url.add_run()
+            # Usamos URL corta de YouTube para que quepa mejor
+            run_url.text = f"   🔗 https://youtu.be/{v['id']}"
+            run_url.font.size = Pt(14)
+            run_url.font.color.rgb = _rgb("2E86DE") # Azul brillante
             
             y_pos += Inches(0.9)
 
