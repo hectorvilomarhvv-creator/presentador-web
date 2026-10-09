@@ -1,5 +1,5 @@
 """Presentador: busca un tema, crea PPTX y agrega videos de YouTube.
-Sin API Keys externas. Sistema de Login + Búsqueda Híbrida + Videos.
+Con sistema de Login, Búsqueda Híbrida Inteligente y Videos sin API Keys.
 """
 import html
 import io
@@ -11,6 +11,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from urllib.parse import quote_plus
 
 import requests
 from flask import Flask, jsonify, render_template, request, send_file, redirect, url_for, flash
@@ -74,50 +75,66 @@ TEMAS = {
     "morado": ("3B2A5E", "7E57C2", "F6F3FB"),
 }
 
-# ----------------------------------------------------------------- búsqueda híbrida
+# ----------------------------------------------------------------- búsqueda híbrida MEJORADA
 def buscar_duckduckgo(tema, idioma="es"):
+    """Busca info moderna. Retorna (titulo, texto, url) o None."""
     try:
-        url = f"https://api.duckduckgo.com/?q={tema}&format=json&no_html=1&skip_disambig=1"
+        url = f"https://api.duckduckgo.com/?q={quote_plus(tema)}&format=json&no_html=1&skip_disambig=1"
         r = requests.get(url, headers={"User-Agent": "PresentadorBot/1.0"}, timeout=10)
         r.raise_for_status()
         data = r.json()
+        
+        # Intentar obtener AbstractText
         resumen = data.get("AbstractText", "")
         url_fuente = data.get("AbstractURL", "")
+        
+        # Si no hay abstract, intentar con RelatedTopics
         if not resumen and data.get("RelatedTopics"):
-            primer_tema = data["RelatedTopics"][0]
-            if "Text" in primer_tema:
-                resumen = primer_tema["Text"]
-                if "FirstURL" in primer_tema:
-                    url_fuente = primer_tema["FirstURL"]
-        if resumen and len(resumen) > 50:
+            for topic in data["RelatedTopics"]:
+                if "Text" in topic and len(topic["Text"]) > 50:
+                    resumen = topic["Text"]
+                    if "FirstURL" in topic:
+                        url_fuente = topic["FirstURL"]
+                    break
+
+        # Si encontramos algo sustancial, retornarlo
+        if resumen and len(resumen) > 30:
             return tema, resumen.replace("\n", " ").strip(), url_fuente
+            
     except Exception as e:
         print(f"Error en DuckDuckGo: {e}")
     return None
 
 def buscar_wikipedia(tema, idioma="es"):
+    """Busca info enciclopédica. Retorna (titulo, texto, url) o None."""
     base = f"https://{idioma}.wikipedia.org/w/api.php"
     try:
+        # Buscar título
         r = requests.get(base, params={"action": "query", "list": "search", "srsearch": tema, "srlimit": 1, "format": "json"}, headers=HEADERS, timeout=15)
         r.raise_for_status()
         resultados = r.json().get("query", {}).get("search", [])
         if not resultados:
             return None
-        titulo = resultados[0]["title"]
-        r = requests.get(base, params={"action": "query", "prop": "extracts", "explaintext": 1, "exsectionformat": "plain", "titles": titulo, "format": "json", "redirects": 1}, headers=HEADERS, timeout=15)
+            
+        titulo_wiki = resultados[0]["title"]
+        
+        # Obtener extracto
+        r = requests.get(base, params={"action": "query", "prop": "extracts", "explaintext": 1, "exsectionformat": "plain", "titles": titulo_wiki, "format": "json", "redirects": 1}, headers=HEADERS, timeout=15)
         r.raise_for_status()
         paginas = r.json().get("query", {}).get("pages", {})
         texto = next(iter(paginas.values())).get("extract", "")
-        url = f"https://{idioma}.wikipedia.org/wiki/{titulo.replace(' ', '_')}"
-        return titulo, texto, url
-    except requests.RequestException:
-        return None
+        url = f"https://{idioma}.wikipedia.org/wiki/{titulo_wiki.replace(' ', '_')}"
+        
+        if texto and len(texto) > 100:
+            return titulo_wiki, texto, url
+    except requests.RequestException as e:
+        print(f"Error en Wikipedia: {e}")
+    return None
 
 def buscar_videos_youtube(tema, max_results=3):
     """Busca videos en YouTube vía RSS público (Sin API Key)."""
     try:
-        # Usamos el feed RSS de búsqueda de YouTube
-        rss_url = f"https://www.youtube.com/feeds/videos.xml?search_query={requests.utils.quote(tema)}"
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?search_query={quote_plus(tema)}"
         r = requests.get(rss_url, headers={"User-Agent": "PresentadorBot/1.0"}, timeout=10)
         
         if r.status_code != 200 or len(r.content) < 100:
@@ -312,7 +329,6 @@ def crear_pptx(titulo, slides, fuente_url, tema_color, portada=None, con_notas=T
         
         y_pos = Inches(2.4)
         for v in videos:
-            # Crear enlace clickable
             caja_link = s_vid.shapes.add_textbox(Inches(0.8), y_pos, Inches(11.5), Inches(0.6))
             tf_link = caja_link.text_frame
             tf_link.word_wrap = True
@@ -320,10 +336,9 @@ def crear_pptx(titulo, slides, fuente_url, tema_color, portada=None, con_notas=T
             run_link = p_link.add_run()
             run_link.text = f"▶ {v['titulo']}"
             run_link.font.size = Pt(16)
-            run_link.font.color.rgb = _rgb("2E86DE") # Azul brillante
+            run_link.font.color.rgb = _rgb("2E86DE")
             run_link.font.bold = True
             
-            # Agregar hyperlink al texto
             hlink = run_link.hyperlink
             hlink.address = v['url']
             
@@ -429,9 +444,11 @@ def generar():
     if not tema:
         return jsonify(error="Escribe un tema."), 400
 
-    # LÓGICA DE BÚSQUEDA HÍBRIDA
+    # LÓGICA DE BÚSQUEDA HÍBRIDA INTELIGENTE
     encontrado = buscar_duckduckgo(tema, idioma)
     fuente_actual = "DuckDuckGo (Web Actual)"
+    
+    # Si DDG falla, intentar Wikipedia ANTES de dar error
     if not encontrado:
         encontrado = buscar_wikipedia(tema, idioma)
         fuente_actual = "Wikipedia"
@@ -441,7 +458,7 @@ def generar():
         
     titulo, texto, url = encontrado
 
-    # BUSCAR VIDEOS DE YOUTUBE (Nuevo)
+    # BUSCAR VIDEOS DE YOUTUBE
     videos = buscar_videos_youtube(tema, max_results=3)
 
     slides, avisos = [], []
@@ -470,7 +487,6 @@ def generar():
             avisos.append(f"No encontré imagen para {sin_imagen} diapositiva(s).")
     aviso = " ".join(avisos) or None
 
-    # Pasar videos a la función de creación
     archivo = crear_pptx(titulo, slides, url, color, portada=portada, con_notas=con_notas, videos=videos)
     nombre = nombre_seguro(titulo) + ".pptx"
 
@@ -496,7 +512,7 @@ with app.app_context():
         db.session.commit()
         print("=" * 50)
         print("✅ Usuario admin creado automáticamente")
-        print("👤 Usuario: admin | 🔑 Contraseña: admin123")
+        print(" Usuario: admin | 🔑 Contraseña: admin123")
         print("=" * 50)
     else:
         print("✅ El usuario admin ya existe")
