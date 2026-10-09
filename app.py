@@ -79,6 +79,7 @@ TEMAS = {
 def buscar_duckduckgo(tema, idioma="es"):
     """Busca info moderna. Retorna (titulo, texto, url) o None."""
     try:
+        # Usamos quote_plus para manejar espacios y caracteres especiales
         url = f"https://api.duckduckgo.com/?q={quote_plus(tema)}&format=json&no_html=1&skip_disambig=1"
         r = requests.get(url, headers={"User-Agent": "PresentadorBot/1.0"}, timeout=10)
         r.raise_for_status()
@@ -125,7 +126,8 @@ def buscar_wikipedia(tema, idioma="es"):
         texto = next(iter(paginas.values())).get("extract", "")
         url = f"https://{idioma}.wikipedia.org/wiki/{titulo_wiki.replace(' ', '_')}"
         
-        if texto and len(texto) > 100:
+        # Relajamos la validación de longitud para evitar falsos negativos
+        if texto and len(texto) > 50: 
             return titulo_wiki, texto, url
     except requests.RequestException as e:
         print(f"Error en Wikipedia: {e}")
@@ -193,13 +195,24 @@ def buscar_imagen(consulta, usadas):
 
 # ------------------------------------------------------- contenido
 def oraciones(texto):
+    # Dividimos por puntos seguidos, exclamaciones o interrogaciones
     partes = re.split(r"(?<=[.!?])\s+", texto.replace("\n", " "))
+    # Filtramos oraciones que tengan entre 40 y 220 caracteres
     return [p.strip() for p in partes if 40 <= len(p.strip()) <= 220]
 
 def diapositivas_desde_texto(titulo, texto, cantidad):
+    # Limpiamos secciones irrelevantes de Wikipedia
     texto = re.split(r"\n(?:Véase también|Referencias|Enlaces externos|See also|References)\b", texto)[0]
     oraciones_ok = oraciones(texto)
+    
+    # Si no hay oraciones válidas, intentamos dividir por párrafos como fallback
+    if not oraciones_ok:
+        parrafos = [p.strip() for p in texto.split("\n") if len(p.strip()) > 50]
+        if parrafos:
+            oraciones_ok = parrafos[:cantidad * 2] # Tomamos suficientes párrafos
+
     if not oraciones_ok: return []
+    
     por_slide = 4
     total = min(cantidad, max(1, len(oraciones_ok) // por_slide))
     paso = max(1, len(oraciones_ok) // total)
@@ -455,14 +468,16 @@ def generar():
         return jsonify(error="Escribe un tema."), 400
 
     # LÓGICA DE BÚSQUEDA HÍBRIDA INTELIGENTE
+    # 1. Intentar DuckDuckGo primero
     encontrado = buscar_duckduckgo(tema, idioma)
     fuente_actual = "DuckDuckGo (Web Actual)"
     
-    # Si DDG falla, intentar Wikipedia ANTES de dar error
+    # 2. Si DDG falla, intentar Wikipedia ANTES de dar error
     if not encontrado:
         encontrado = buscar_wikipedia(tema, idioma)
         fuente_actual = "Wikipedia"
 
+    # 3. Si ambas fallan, entonces sí damos error
     if not encontrado:
         return jsonify(error="No encontré información suficiente sobre ese tema en ninguna fuente."), 404
         
