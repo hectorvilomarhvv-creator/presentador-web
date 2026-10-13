@@ -1,548 +1,904 @@
-"""Presentador: busca un tema, crea PPTX y agrega videos de YouTube.
-Con sistema de Login, Búsqueda Híbrida Inteligente y Videos sin API Keys.
-"""
+import base64
 import html
 import io
-import json
-import os
-import platform
 import re
-import tempfile
-import time
-import xml.etree.ElementTree as ET
-from collections import defaultdict
-from urllib.parse import quote_plus
+from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, render_template, request, send_file, redirect, url_for, flash
-from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
-from PIL import Image
+import streamlit as st
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
-from pptx.util import Emu, Inches, Pt
+from pptx.enum.text import MSO_ANCHOR
+from pptx.util import Inches, Pt
 
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 10_000
+BASE_DIR = Path(__file__).resolve().parent
+LOGO_CANDIDATOS = ["logo.png", "logo.jpg", "logo.jpeg", "logo.webp"]
+_LOGO = next((BASE_DIR / n for n in LOGO_CANDIDATOS if (BASE_DIR / n).exists()), None)
 
-# --- Configuración ---
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'clave_secreta_muy_segura_123')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///usuarios.db')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+st.set_page_config(
+    page_title="PLANI PRESENTACION LEVEL",
+    page_icon=str(_LOGO) if _LOGO else "🎓",
+    layout="centered",
+)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-CONTACTO = os.environ.get("CONTACT", "").strip()
-LIMITE_DIARIO = int(os.environ.get("DAILY_LIMIT", "20"))
+HEADERS = {
+    "User-Agent": "PresentadorEducativo/1.0 (app educativa; contacto: tu-correo@ejemplo.com)"
+}
+TIMEOUT = 8
 
-HEADERS = {"User-Agent": "Presentador/1.0 (herramienta educativa" + (f"; {CONTACTO}" if CONTACTO else "") + ")"}
+# =====================================================================
+#  USUARIOS, LOGIN Y PANEL DE ADMINISTRADOR
+# =====================================================================
+import datetime as dt
+import hashlib
+import hmac
+import json
+import secrets as pysecrets
 
-# --- Base de datos y Login ---
-db = SQLAlchemy(app)
-login_manager = LoginManager(app)
-login_manager.login_view = 'login'
+TITULO_APP = "PLANI PRESENTACION LEVEL"
+USUARIOS_PATH = BASE_DIR / "usuarios.json"
 
-class User(UserMixin, db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(120), nullable=False)
-    is_admin = db.Column(db.Boolean, default=False)
-    uso_diario = db.Column(db.Integer, default=0)
-    fecha_ultimo_uso = db.Column(db.String(10), default="")
+def _hash(password, salt=None):
+    salt = salt or pysecrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt), 200_000
+    )
+    return salt, h.hex()
 
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
 
-def registrar_uso(usuario):
-    hoy = time.strftime("%Y-%m-%d")
-    if usuario.fecha_ultimo_uso != hoy:
-        usuario.uso_diario = 0
-        usuario.fecha_ultimo_uso = hoy
-    if usuario.uso_diario >= LIMITE_DIARIO:
-        return False
-    usuario.uso_diario += 1
-    db.session.commit()
-    return True
+def _nuevo_registro(nombre, password, rol="usuario", vence=None, clave_inicial=False):
+    salt, h = _hash(password)
+    return {
+        "nombre": nombre, "salt": salt, "hash": h, "rol": rol,
+        "activo": True, "vence": vence,
+        "creado": dt.date.today().isoformat(),
+        "clave_inicial": clave_inicial,
+    }
 
-TEMAS = {
-    "azul": ("1F3A5F", "2E86DE", "F4F7FB"),
-    "verde": ("1B4332", "2D9C6B", "F2F8F5"),
-    "naranja": ("7A3E00", "E67E22", "FDF6EE"),
-    "morado": ("3B2A5E", "7E57C2", "F6F3FB"),
+
+def _clave_correcta(password, reg):
+    _, h = _hash(password, reg["salt"])
+    return hmac.compare_digest(h, reg["hash"])
+
+
+def guardar_usuarios(usuarios):
+    tmp = USUARIOS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(usuarios, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(USUARIOS_PATH)
+
+
+def cargar_usuarios():
+    if USUARIOS_PATH.exists():
+        try:
+            return json.loads(USUARIOS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            st.error("No se pudo leer usuarios.json. Revisa el archivo antes de continuar.")
+            st.stop()
+    # Primera ejecución: crear el administrador inicial
+    try:
+        admin_user = str(st.secrets["admin"]["usuario"]).strip().lower()
+        admin_pass = str(st.secrets["admin"]["clave"])
+        inicial = False
+    except Exception:
+        admin_user, admin_pass, inicial = "admin", "admin2026", True
+    usuarios = {
+        admin_user: _nuevo_registro("Administrador", admin_pass, "admin", None, inicial)
+    }
+    guardar_usuarios(usuarios)
+    return usuarios
+
+
+def autenticar(usuario, password):
+    reg = cargar_usuarios().get(usuario.strip().lower())
+    if not reg or not _clave_correcta(password, reg):
+        return None, "Usuario o contraseña incorrectos."
+    if not reg.get("activo", True):
+        return None, "Tu cuenta está desactivada. Contacta al administrador."
+    vence = reg.get("vence")
+    if vence and dt.date.fromisoformat(vence) < dt.date.today():
+        return None, "Tu acceso venció. Contacta al administrador para renovarlo."
+    return reg, None
+
+
+ESTILO_BASE = """
+<style>
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stForm"] {
+    background: #FFFFFF; border: 1px solid #D9E4F5; border-radius: 18px;
+    padding: 1.6rem 1.8rem 1.4rem; box-shadow: 0 8px 24px rgba(10,42,94,.10);
+}
+.stButton > button, .stDownloadButton > button,
+[data-testid="stFormSubmitButton"] > button {
+    background: linear-gradient(90deg, #0A2A5E, #1A5BB5); color: #FFFFFF; border: none;
+    border-radius: 10px; font-weight: 700; padding: .55rem 1.3rem;
+    box-shadow: 0 4px 12px rgba(15,63,140,.30);
+}
+.stButton > button p, .stDownloadButton > button p,
+[data-testid="stFormSubmitButton"] > button p { color: #FFFFFF; }
+.stButton > button:hover, .stDownloadButton > button:hover,
+[data-testid="stFormSubmitButton"] > button:hover { filter: brightness(1.18); color: #FFFFFF; }
+.stButton > button:disabled { opacity: .45; }
+.plani-logo-ph {
+    width: 110px; height: 110px; margin: 0 auto; border-radius: 50%;
+    background: #0F3F8C; color: #D4AF37; font-weight: 800; font-size: 1.4rem;
+    display: flex; align-items: center; justify-content: center;
+}
+</style>
+"""
+
+ESTILO_LOGIN = """
+<style>
+.stApp, [data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(circle at 12% 8%, rgba(26,91,181,.75) 0%, rgba(26,91,181,0) 42%),
+        radial-gradient(circle at 90% 95%, rgba(212,175,55,.18) 0%, rgba(212,175,55,0) 35%),
+        linear-gradient(135deg, #071F47 0%, #0A2A5E 45%, #0F3F8C 100%);
+}
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] { display: none; }
+.block-container { max-width: 520px !important; padding-top: 3rem; }
+.plani-title {
+    color: #FFFFFF; text-align: center; font-weight: 800; letter-spacing: .08em;
+    font-size: clamp(1.3rem, 5vw, 1.8rem); margin: .5rem 0 .2rem;
+}
+.plani-title::after {
+    content: ""; display: block; width: 72px; height: 3px; background: #D4AF37;
+    margin: .7rem auto 0; border-radius: 2px;
+}
+.plani-tag { color: #BFD3F2; text-align: center; margin: .6rem 0 1.5rem; font-size: .95rem; }
+.plani-badge {
+    background: linear-gradient(135deg, #071F47, #0F3F8C); border-radius: 16px;
+    padding: 18px; text-align: center; margin-bottom: 14px;
+    border-bottom: 3px solid #D4AF37;
+}
+.plani-badge img { height: 130px; width: auto; }
+.plani-sub { text-align: center; color: #0A2A5E; font-weight: 600; margin: .2rem 0 1rem; }
+[data-testid="stForm"] { border: none; box-shadow: 0 24px 60px rgba(0,0,0,.40); }
+[data-testid="stForm"] label p { color: #0A2A5E; font-weight: 600; }
+</style>
+"""
+
+ESTILO_APP = """
+<style>
+.stApp { background: #EEF3FA; }
+.block-container { max-width: 1100px !important; padding-top: 1.5rem; }
+h1, h2, h3, h4 { color: #0A2A5E; }
+
+/* Barra lateral */
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #071F47 0%, #0F3F8C 100%); }
+[data-testid="stSidebar"] * { color: #FFFFFF; }
+[data-testid="stSidebar"] input { color: #0A2A5E !important; -webkit-text-fill-color: #0A2A5E; }
+[data-testid="stSidebar"] [data-testid="stAlert"] * { color: #0A2A5E !important; }
+[data-testid="stSidebar"] [data-testid="stForm"] {
+    background: transparent; border: none; box-shadow: none; padding: 0;
+}
+[data-testid="stSidebar"] .stButton > button,
+[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] > button {
+    background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.55);
+    box-shadow: none; width: 100%;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] {
+    border: 1px solid rgba(255,255,255,.25); border-radius: 12px;
+}
+.plani-user {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px; margin-bottom: 12px;
+    background: rgba(255,255,255,.10); border-radius: 14px; border-left: 4px solid #D4AF37;
+}
+.plani-avatar {
+    width: 42px; height: 42px; border-radius: 50%; background: #D4AF37; color: #0A2A5E !important;
+    font-weight: 800; font-size: 1.2rem; display: flex; align-items: center; justify-content: center;
+    flex: 0 0 auto;
+}
+.plani-user b { display: block; line-height: 1.2; }
+.plani-user span { font-size: .8rem; color: #BFD3F2; }
+
+/* Banner superior */
+.plani-banner {
+    display: flex; align-items: center; gap: 22px; margin-bottom: 1.1rem;
+    padding: 14px 26px; border-radius: 20px; border-bottom: 4px solid #D4AF37;
+    background: linear-gradient(120deg, #071F47 0%, #0A2A5E 40%, #1A5BB5 100%);
+    box-shadow: 0 10px 28px rgba(10,42,94,.28);
+}
+.plani-banner img { height: 78px; width: auto; flex: 0 0 auto; }
+.plani-banner .t {
+    color: #FFFFFF; font-weight: 800; letter-spacing: .07em; line-height: 1.2;
+    font-size: clamp(1.1rem, 3.2vw, 1.7rem);
+}
+.plani-banner .s { color: #BFD3F2; margin-top: .25rem; font-size: .92rem; }
+
+/* Pestañas */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 8px; background: #FFFFFF; padding: 6px; border-radius: 14px;
+    box-shadow: 0 2px 10px rgba(10,42,94,.08);
+}
+.stTabs [data-baseweb="tab"] { border-radius: 10px; padding: 8px 18px; height: auto; }
+.stTabs [data-baseweb="tab"] p { color: #0A2A5E; font-weight: 600; }
+.stTabs [aria-selected="true"] { background: #0F3F8C; }
+.stTabs [aria-selected="true"] p { color: #FFFFFF; }
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display: none; }
+
+/* Tarjetas de estadísticas */
+.plani-stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 14px; margin: .6rem 0 1.2rem;
+}
+.plani-stat {
+    background: #FFFFFF; border-radius: 16px; padding: 16px 18px;
+    border-left: 5px solid #0F3F8C; box-shadow: 0 4px 14px rgba(10,42,94,.09);
+}
+.plani-stat b { display: block; font-size: 2rem; line-height: 1.1; color: #0A2A5E; }
+.plani-stat span { color: #5A6F94; font-size: .78rem; text-transform: uppercase; letter-spacing: .07em; }
+.plani-stat.ok { border-left-color: #1E9E6A; }
+.plani-stat.warn { border-left-color: #E0A100; }
+.plani-stat.bad { border-left-color: #D64545; }
+
+/* Encabezado del generador */
+.plani-hero {
+    background: #FFFFFF; border-radius: 16px; padding: 1rem 1.4rem; margin-bottom: 1rem;
+    border-left: 6px solid #D4AF37; box-shadow: 0 4px 14px rgba(10,42,94,.09);
+}
+.plani-hero b { color: #0A2A5E; font-size: 1.25rem; }
+.plani-hero p { margin: .3rem 0 0; color: #4A5F85; }
+</style>
+"""
+
+
+def _logo_b64():
+    for nombre in LOGO_CANDIDATOS:
+        ruta = BASE_DIR / nombre
+        if ruta.exists():
+            try:
+                from PIL import Image
+                im = Image.open(ruta).convert("RGBA")
+                im.thumbnail((400, 400))
+                buf = io.BytesIO()
+                im.save(buf, "PNG")
+                return base64.b64encode(buf.getvalue()).decode()
+            except Exception:
+                return None
+    return None
+
+
+_logo_b64 = st.cache_resource(show_spinner=False)(_logo_b64)
+
+
+def _logo_html():
+    b64 = _logo_b64()
+    if b64:
+        return f'<img src="data:image/png;base64,{b64}" alt="PLANI">'
+    return '<div class="plani-logo-ph">PLANI</div>'
+
+
+def pantalla_login():
+    st.markdown(ESTILO_BASE + ESTILO_LOGIN, unsafe_allow_html=True)
+    st.markdown(f'<div class="plani-title">{TITULO_APP}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="plani-tag">Generador de presentaciones educativas</div>',
+                unsafe_allow_html=True)
+    with st.form("login_form"):
+        st.markdown(
+            f'<div class="plani-badge">{_logo_html()}</div>'
+            '<div class="plani-sub">Inicia sesión para continuar</div>',
+            unsafe_allow_html=True,
+        )
+        user = st.text_input("Usuario")
+        password = st.text_input("Contraseña", type="password")
+        entrar = st.form_submit_button("Ingresar", use_container_width=True)
+    if entrar:
+        reg, error = autenticar(user, password)
+        if error:
+            st.error(error)
+        else:
+            st.session_state.update(
+                autenticado=True,
+                usuario=user.strip().lower(),
+                rol=reg["rol"],
+                nombre=reg.get("nombre") or user.strip(),
+            )
+            st.rerun()
+
+
+def banner():
+    st.markdown(
+        f'<div class="plani-banner">{_logo_html()}<div>'
+        f'<div class="t">{TITULO_APP}</div>'
+        '<div class="s">Generador de presentaciones educativas con información real</div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def sidebar_usuario():
+    nombre = str(st.session_state.get("nombre") or st.session_state.usuario)
+    rol = "Administrador" if st.session_state.get("rol") == "admin" else "Usuario"
+    st.sidebar.markdown(
+        f'<div class="plani-user"><div class="plani-avatar">{html.escape(nombre[:1].upper())}</div>'
+        f'<div><b>{html.escape(nombre)}</b><span>{rol}</span></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def estado_usuario(reg):
+    if not reg.get("activo", True):
+        return "Desactivado"
+    v = reg.get("vence")
+    if v:
+        dias = (dt.date.fromisoformat(v) - dt.date.today()).days
+        if dias < 0:
+            return "Vencido"
+        if dias <= 7:
+            return "Por vencer"
+    return "Activo"
+
+
+def _es_ultimo_admin(usuarios, usuario):
+    admins = [u for u, r in usuarios.items() if r["rol"] == "admin" and r.get("activo", True)]
+    return usuarios[usuario]["rol"] == "admin" and admins == [usuario]
+
+
+def cambiar_mi_clave():
+    with st.sidebar.expander("🔑 Cambiar mi contraseña"):
+        with st.form("form_mi_clave", clear_on_submit=True):
+            actual = st.text_input("Contraseña actual", type="password")
+            nueva = st.text_input("Nueva contraseña (mín. 6)", type="password")
+            ok = st.form_submit_button("Actualizar")
+        if ok:
+            usuarios = cargar_usuarios()
+            yo = usuarios.get(st.session_state.usuario)
+            if not yo or not _clave_correcta(actual, yo):
+                st.error("La contraseña actual no es correcta.")
+            elif len(nueva) < 6:
+                st.error("La nueva contraseña debe tener al menos 6 caracteres.")
+            else:
+                yo["salt"], yo["hash"] = _hash(nueva)
+                yo["clave_inicial"] = False
+                guardar_usuarios(usuarios)
+                st.success("Contraseña actualizada.")
+
+
+def panel_admin():
+    usuarios = cargar_usuarios()
+    yo = st.session_state.usuario
+    if "flash" in st.session_state:
+        st.success(st.session_state.pop("flash"))
+    if usuarios.get(yo, {}).get("clave_inicial"):
+        st.warning(
+            "Estás usando la contraseña inicial del administrador. "
+            "Cámbiala en el menú lateral (🔑 Cambiar mi contraseña)."
+        )
+
+    # ---- Resumen ----
+    estados = [estado_usuario(r) for r in usuarios.values()]
+    st.markdown(
+        '<div class="plani-stats">'
+        f'<div class="plani-stat"><b>{len(estados)}</b><span>Usuarios totales</span></div>'
+        f'<div class="plani-stat ok"><b>{estados.count("Activo") + estados.count("Por vencer")}</b><span>Con acceso</span></div>'
+        f'<div class="plani-stat warn"><b>{estados.count("Por vencer")}</b><span>Vencen en 7 días</span></div>'
+        f'<div class="plani-stat bad"><b>{estados.count("Vencido") + estados.count("Desactivado")}</b><span>Vencidos o desactivados</span></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ---- Crear usuario ----
+    st.subheader("➕ Crear usuario")
+    with st.form("crear_usuario", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        nombre = c1.text_input("Nombre completo")
+        nuevo = c2.text_input("Usuario (letras, números, . _ -)")
+        c3, c4 = st.columns(2)
+        clave = c3.text_input("Contraseña (mín. 6 caracteres)", type="password")
+        rol = c4.selectbox("Rol", ["usuario", "admin"])
+        sin_venc = st.checkbox("Sin fecha de vencimiento")
+        vence = st.date_input(
+            "Acceso válido hasta", value=dt.date.today() + dt.timedelta(days=30)
+        )
+        crear = st.form_submit_button("Crear usuario")
+    if crear:
+        nuevo = nuevo.strip().lower()
+        if not re.fullmatch(r"[a-z0-9_.-]{3,30}", nuevo):
+            st.error("Usuario inválido: usa de 3 a 30 letras minúsculas, números, punto, guion o guion bajo.")
+        elif nuevo in usuarios:
+            st.error("Ese usuario ya existe.")
+        elif len(clave) < 6:
+            st.error("La contraseña debe tener al menos 6 caracteres.")
+        else:
+            usuarios[nuevo] = _nuevo_registro(
+                nombre.strip() or nuevo, clave, rol,
+                None if sin_venc else vence.isoformat(),
+            )
+            guardar_usuarios(usuarios)
+            st.session_state.flash = f"Usuario «{nuevo}» creado."
+            st.rerun()
+
+    # ---- Lista ----
+    st.subheader("👥 Usuarios")
+    st.dataframe(
+        [
+            {
+                "Usuario": u,
+                "Nombre": r.get("nombre", ""),
+                "Rol": r["rol"],
+                "Estado": estado_usuario(r),
+                "Vence": r.get("vence") or "Sin vencimiento",
+                "Creado": r.get("creado", ""),
+            }
+            for u, r in usuarios.items()
+        ],
+        use_container_width=True, hide_index=True,
+    )
+
+    # ---- Gestionar ----
+    st.subheader("⚙️ Gestionar usuario")
+    sel = st.selectbox("Selecciona un usuario", list(usuarios))
+    reg = usuarios[sel]
+    a, b = st.columns(2)
+
+    with a:
+        with st.form(f"form_estado_{sel}"):
+            activo = st.checkbox("Cuenta activa", value=reg.get("activo", True))
+            sin = st.checkbox("Sin vencimiento", value=not reg.get("vence"))
+            fecha = st.date_input(
+                "Válido hasta",
+                value=dt.date.fromisoformat(reg["vence"]) if reg.get("vence")
+                else dt.date.today() + dt.timedelta(days=30),
+            )
+            guardar = st.form_submit_button("Guardar cambios")
+        if guardar:
+            if not activo and sel == yo:
+                st.error("No puedes desactivar tu propia cuenta.")
+            elif not activo and _es_ultimo_admin(usuarios, sel):
+                st.error("Debe quedar al menos un administrador activo.")
+            else:
+                reg["activo"] = activo
+                reg["vence"] = None if sin else fecha.isoformat()
+                guardar_usuarios(usuarios)
+                st.session_state.flash = f"Cambios guardados para «{sel}»."
+                st.rerun()
+
+    with b:
+        with st.form(f"form_clave_{sel}", clear_on_submit=True):
+            nueva = st.text_input("Nueva contraseña (mín. 6)", type="password")
+            restablecer = st.form_submit_button("Restablecer contraseña")
+        if restablecer:
+            if len(nueva) < 6:
+                st.error("La contraseña debe tener al menos 6 caracteres.")
+            else:
+                reg["salt"], reg["hash"] = _hash(nueva)
+                reg["clave_inicial"] = False
+                guardar_usuarios(usuarios)
+                st.session_state.flash = f"Contraseña de «{sel}» restablecida."
+                st.rerun()
+
+    confirmar = st.checkbox(f"Confirmo que quiero eliminar a «{sel}»", key=f"conf_{sel}")
+    if st.button("🗑️ Eliminar usuario", disabled=not confirmar):
+        if sel == yo:
+            st.error("No puedes eliminar tu propia cuenta.")
+        elif _es_ultimo_admin(usuarios, sel):
+            st.error("Debe quedar al menos un administrador activo.")
+        else:
+            del usuarios[sel]
+            guardar_usuarios(usuarios)
+            st.session_state.flash = f"Usuario «{sel}» eliminado."
+            st.rerun()
+
+
+# =====================================================================
+#  BÚSQUEDA DE INFORMACIÓN REAL
+# =====================================================================
+SECCIONES_IGNORADAS = {
+    "referencias", "véase también", "enlaces externos", "notas",
+    "bibliografía", "further reading", "references", "see also",
+    "external links", "notes", "bibliography", "citas", "galería",
 }
 
-# ----------------------------------------------------------------- búsqueda híbrida MEJORADA
-def buscar_duckduckgo(tema, idioma="es"):
-    """Busca info moderna. Retorna (titulo, texto, url) o None."""
-    try:
-        # Usamos quote_plus para manejar espacios y caracteres especiales
-        url = f"https://api.duckduckgo.com/?q={quote_plus(tema)}&format=json&no_html=1&skip_disambig=1"
-        r = requests.get(url, headers={"User-Agent": "PresentadorBot/1.0"}, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        
-        # Intentar obtener AbstractText
-        resumen = data.get("AbstractText", "")
-        url_fuente = data.get("AbstractURL", "")
-        
-        # Si no hay abstract, intentar con RelatedTopics
-        if not resumen and data.get("RelatedTopics"):
-            for topic in data["RelatedTopics"]:
-                if "Text" in topic and len(topic["Text"]) > 50:
-                    resumen = topic["Text"]
-                    if "FirstURL" in topic:
-                        url_fuente = topic["FirstURL"]
-                    break
 
-        # Si encontramos algo sustancial, retornarlo
-        if resumen and len(resumen) > 30:
-            return tema, resumen.replace("\n", " ").strip(), url_fuente
-            
-    except Exception as e:
-        print(f"Error en DuckDuckGo: {e}")
-    return None
+def _get(url, **params):
+    r = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
 
-def buscar_wikipedia(tema, idioma="es"):
-    """Busca info enciclopédica. Retorna (titulo, texto, url) o None."""
-    base = f"https://{idioma}.wikipedia.org/w/api.php"
-    try:
-        # Buscar título
-        r = requests.get(base, params={"action": "query", "list": "search", "srsearch": tema, "srlimit": 1, "format": "json"}, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        resultados = r.json().get("query", {}).get("search", [])
-        if not resultados:
-            return None
-            
-        titulo_wiki = resultados[0]["title"]
-        
-        # Obtener extracto
-        r = requests.get(base, params={"action": "query", "prop": "extracts", "explaintext": 1, "exsectionformat": "plain", "titles": titulo_wiki, "format": "json", "redirects": 1}, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        paginas = r.json().get("query", {}).get("pages", {})
-        texto = next(iter(paginas.values())).get("extract", "")
-        url = f"https://{idioma}.wikipedia.org/wiki/{titulo_wiki.replace(' ', '_')}"
-        
-        # Relajamos la validación de longitud para evitar falsos negativos
-        if texto and len(texto) > 50: 
-            return titulo_wiki, texto, url
-    except requests.RequestException as e:
-        print(f"Error en Wikipedia: {e}")
-    return None
 
-def buscar_videos_youtube(tema, max_results=3):
-    """Busca videos en YouTube vía RSS público (Sin API Key)."""
+@st.cache_data(ttl=3600, show_spinner=False)
+def wiki_buscar(consulta, lang, limite=5):
     try:
-        rss_url = f"https://www.youtube.com/feeds/videos.xml?search_query={quote_plus(tema)}"
-        r = requests.get(rss_url, headers={"User-Agent": "PresentadorBot/1.0"}, timeout=10)
-        
-        if r.status_code != 200 or len(r.content) < 100:
-            return []
-            
-        root = ET.fromstring(r.content)
-        ns = {'atom': 'http://www.w3.org/2005/Atom'}
-        
-        videos = []
-        for entry in root.findall('atom:entry', ns)[:max_results]:
-            title_elem = entry.find('atom:title', ns)
-            link_elem = entry.find('atom:link', ns)
-            
-            if title_elem is not None and link_elem is not None:
-                title = title_elem.text
-                href = link_elem.get('href', '')
-                video_id = href.split('v=')[1].split('&')[0] if 'v=' in href else None
-                
-                if video_id:
-                    videos.append({
-                        'titulo': title,
-                        'url': f"https://www.youtube.com/watch?v={video_id}",
-                        'id': video_id
-                    })
-        return videos
-    except Exception as e:
-        print(f"Error buscando videos YT: {e}")
+        data = _get(
+            f"https://{lang}.wikipedia.org/w/api.php",
+            action="query", list="search", srsearch=consulta,
+            srlimit=limite, format="json",
+        )
+        return [x["title"] for x in data["query"]["search"]]
+    except Exception:
         return []
 
-def _limpiar_html(texto):
-    return re.sub(r"<[^>]+>", "", html.unescape(texto or "")).strip()
 
-def buscar_imagen(consulta, usadas):
+@st.cache_data(ttl=3600, show_spinner=False)
+def wiki_pagina(titulo, lang):
+    """Devuelve texto completo con secciones, url e imagen principal."""
     try:
-        r = requests.get("https://commons.wikimedia.org/w/api.php", params={"action": "query", "generator": "search", "gsrsearch": consulta, "gsrnamespace": 6, "gsrlimit": 10, "prop": "imageinfo", "iiprop": "url|mime|size|extmetadata", "iiurlwidth": 900, "format": "json"}, headers=HEADERS, timeout=10)
-        r.raise_for_status()
-        paginas = r.json().get("query", {}).get("pages", {})
-        for p in sorted(paginas.values(), key=lambda p: p.get("index", 0)):
-            info = (p.get("imageinfo") or [{}])[0]
-            titulo_img = p.get("title", "")
-            if info.get("mime") not in ("image/jpeg", "image/png"): continue
-            if info.get("width", 0) < 500 or titulo_img in usadas: continue
-            if re.search(r"logo|icon|flag|signature", titulo_img, re.I): continue
-            img = requests.get(info.get("thumburl") or info["url"], headers=HEADERS, timeout=15)
-            img.raise_for_status()
-            if len(img.content) > 4_000_000: continue
-            meta = info.get("extmetadata", {})
-            autor = _limpiar_html(meta.get("Artist", {}).get("value"))[:60]
-            licencia = _limpiar_html(meta.get("LicenseShortName", {}).get("value"))
-            usadas.add(titulo_img)
-            credito = (f'{titulo_img.replace("File:", "")} — {autor or "autor no indicado"} ({licencia or "ver Wikimedia Commons"})')
-            return {"datos": img.content, "credito": credito}
+        data = _get(
+            f"https://{lang}.wikipedia.org/w/api.php",
+            action="query", prop="extracts|pageimages|info",
+            titles=titulo, explaintext=1, exsectionformat="wiki",
+            piprop="thumbnail", pithumbsize=900, inprop="url",
+            redirects=1, format="json",
+        )
+        page = next(iter(data["query"]["pages"].values()))
+        if "extract" not in page:
+            return None
+        return {
+            "titulo": page["title"],
+            "texto": page["extract"],
+            "url": page.get("fullurl", ""),
+            "imagen": page.get("thumbnail", {}).get("source"),
+            "lang": lang,
+        }
     except Exception:
         return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def commons_imagenes(consulta, limite=6):
+    """Imágenes libres de Wikimedia Commons."""
+    try:
+        data = _get(
+            "https://commons.wikimedia.org/w/api.php",
+            action="query", generator="search", gsrnamespace=6,
+            gsrsearch=consulta, gsrlimit=limite, prop="imageinfo",
+            iiprop="url|mime|extmetadata", iiurlwidth=900, format="json",
+        )
+        out = []
+        for p in data.get("query", {}).get("pages", {}).values():
+            info = (p.get("imageinfo") or [{}])[0]
+            if info.get("mime") not in ("image/jpeg", "image/png"):
+                continue
+            url = info.get("thumburl") or info.get("url")
+            if not url:
+                continue
+            autor = info.get("extmetadata", {}).get("Artist", {}).get("value", "")
+            autor = re.sub(r"<[^>]+>", "", autor).strip()[:60]
+            out.append({
+                "url": url,
+                "pagina": info.get("descriptionurl", ""),
+                "autor": autor or "Wikimedia Commons",
+            })
+        return out
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def openalex_articulos(consulta, limite=3):
+    try:
+        data = _get(
+            "https://api.openalex.org/works",
+            search=consulta, per_page=limite,
+            select="title,publication_year,doi,primary_location",
+        )
+        return [
+            {"nombre": f"{w['title']} ({w.get('publication_year', 's.f.')})",
+             "url": w.get("doi") or ""}
+            for w in data.get("results", []) if w.get("title")
+        ]
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def openlibrary_libros(consulta, limite=3):
+    try:
+        data = _get(
+            "https://openlibrary.org/search.json",
+            q=consulta, limit=limite, fields="title,author_name,first_publish_year,key",
+        )
+        out = []
+        for d in data.get("docs", []):
+            autor = ", ".join(d.get("author_name", [])[:2]) or "Autor desconocido"
+            out.append({
+                "nombre": f"{d['title']} — {autor} ({d.get('first_publish_year', 's.f.')})",
+                "url": f"https://openlibrary.org{d['key']}",
+            })
+        return out
+    except Exception:
+        return []
+
+
+def parsear_secciones(texto):
+    secciones, titulo, buf = [], "Introducción", []
+    for linea in texto.splitlines():
+        linea = linea.strip()
+        m = re.match(r"^(={2,})\s*(.+?)\s*\1$", linea)
+        if m:
+            if len(m.group(1)) == 2:
+                if buf:
+                    secciones.append((titulo, " ".join(buf)))
+                titulo, buf = m.group(2), []
+            continue
+        if linea:
+            buf.append(linea)
+    if buf:
+        secciones.append((titulo, " ".join(buf)))
+    return [(t, x) for t, x in secciones if t.lower() not in SECCIONES_IGNORADAS]
+
+
+def puntos_clave(texto, maximo=4):
+    texto = re.sub(r"\[\d+\]|\[[a-z]\]", "", texto)
+    frases = re.split(r"(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ¿¡0-9])", texto)
+    buenas = [f.strip() for f in frases if 40 <= len(f.strip()) <= 260]
+    return buenas[:maximo]
+
+
+def recopilar(tema, n_slides):
+    """Reúne contenido real de varias fuentes. Devuelve (slides, fuentes)."""
+    fuentes, slides, usados = [], [], set()
+
+    pagina = None
+    for lang in ("es", "en"):
+        for titulo in wiki_buscar(tema, lang):
+            pagina = wiki_pagina(titulo, lang)
+            if pagina and len(pagina["texto"]) > 400:
+                break
+            pagina = None
+        if pagina:
+            break
+    if not pagina:
+        return [], [], None
+
+    fuentes.append({
+        "nombre": f"Wikipedia ({pagina['lang']}): {pagina['titulo']}",
+        "url": pagina["url"],
+    })
+
+    # Diapositivas desde las secciones reales del artículo
+    for titulo, texto in parsear_secciones(pagina["texto"]):
+        pts = puntos_clave(texto)
+        if pts:
+            slides.append({"titulo": titulo, "puntos": pts, "imagen": None})
+        if len(slides) >= n_slides:
+            break
+
+    # Si faltan diapositivas, completar con artículos relacionados
+    if len(slides) < n_slides:
+        for lang in ("es", "en"):
+            for titulo in wiki_buscar(tema, lang, limite=8):
+                if len(slides) >= n_slides:
+                    break
+                if titulo == pagina["titulo"] or titulo in usados:
+                    continue
+                usados.add(titulo)
+                rel = wiki_pagina(titulo, lang)
+                if not rel:
+                    continue
+                pts = puntos_clave(rel["texto"].split("\n==")[0], 3)
+                if pts:
+                    slides.append({"titulo": rel["titulo"], "puntos": pts,
+                                   "imagen": rel["imagen"] and {
+                                       "url": rel["imagen"], "pagina": rel["url"],
+                                       "autor": "Wikipedia"}})
+                    fuentes.append({"nombre": f"Wikipedia ({lang}): {rel['titulo']}",
+                                    "url": rel["url"]})
+
+    # Imágenes: portada de Wikipedia + búsquedas en Commons por diapositiva
+    vistas = set()
+    if pagina["imagen"]:
+        vistas.add(pagina["imagen"])
+    portada = (
+        {"url": pagina["imagen"], "pagina": pagina["url"], "autor": "Wikipedia"}
+        if pagina["imagen"] else None
+    )
+    pool = [i for i in commons_imagenes(tema, 8)]
+    for s in slides:
+        if s["imagen"]:
+            continue
+        candidatas = commons_imagenes(f"{tema} {s['titulo']}", 4) + pool
+        for c in candidatas:
+            if c["url"] not in vistas:
+                s["imagen"] = c
+                vistas.add(c["url"])
+                if c["pagina"]:
+                    fuentes.append({"nombre": f"Imagen: {c['autor']} (Wikimedia Commons)",
+                                    "url": c["pagina"]})
+                break
+    if portada and slides and not slides[0]["imagen"]:
+        slides[0]["imagen"] = portada
+
+    # Fuentes adicionales: artículos académicos y libros
+    fuentes += openalex_articulos(tema)
+    fuentes += openlibrary_libros(tema)
+    return slides, fuentes, portada
+
+
+# =====================================================================
+#  CONSTRUCCIÓN DEL PPTX
+# =====================================================================
+AZUL = RGBColor(0x1F, 0x3A, 0x5F)
+GRIS = RGBColor(0x33, 0x33, 0x33)
+BLANCO = RGBColor(0xFF, 0xFF, 0xFF)
+
+
+def descargar_imagen(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        if r.status_code == 200 and len(r.content) > 2000:
+            return io.BytesIO(r.content)
+    except Exception:
+        pass
     return None
 
-# ------------------------------------------------------- contenido
-def oraciones(texto):
-    # Dividimos por puntos seguidos, exclamaciones o interrogaciones
-    partes = re.split(r"(?<=[.!?])\s+", texto.replace("\n", " "))
-    # Filtramos oraciones que tengan entre 40 y 220 caracteres
-    return [p.strip() for p in partes if 40 <= len(p.strip()) <= 220]
 
-def diapositivas_desde_texto(titulo, texto, cantidad):
-    # Limpiamos secciones irrelevantes de Wikipedia
-    texto = re.split(r"\n(?:Véase también|Referencias|Enlaces externos|See also|References)\b", texto)[0]
-    oraciones_ok = oraciones(texto)
-    
-    # Si no hay oraciones válidas, intentamos dividir por párrafos como fallback
-    if not oraciones_ok:
-        parrafos = [p.strip() for p in texto.split("\n") if len(p.strip()) > 50]
-        if parrafos:
-            oraciones_ok = parrafos[:cantidad * 2] # Tomamos suficientes párrafos
-
-    if not oraciones_ok: return []
-    
-    por_slide = 4
-    total = min(cantidad, max(1, len(oraciones_ok) // por_slide))
-    paso = max(1, len(oraciones_ok) // total)
-    slides = []
-    for i in range(total):
-        trozo = oraciones_ok[i * paso:(i + 1) * paso]
-        if trozo:
-            puntos = trozo[:por_slide]
-            resto = trozo[por_slide:por_slide + 3]
-            notas = " ".join(resto) if resto else " ".join(puntos)
-            slides.append({"titulo": f"{titulo}: parte {i + 1}", "puntos": puntos, "notas": notas, "imagen": titulo})
-    return slides
-
-def diapositivas_con_gemini(tema, texto, cantidad, idioma):
-    nombre_idioma = "español" if idioma == "es" else "inglés"
-    prompt = (f"Crea el contenido de una presentación en {nombre_idioma} sobre: {tema}.\n"
-              f"Usa exactamente {cantidad} diapositivas de contenido (sin portada).\n"
-              "Cada diapositiva tiene: un título corto, de 3 a 5 puntos breves (máx. 18 palabras cada uno), "
-              "'notas' con 2 a 4 oraciones que el presentador puede decir en voz alta, y "
-              "'imagen' con 2 o 3 palabras clave para buscar una foto adecuada.\n"
-              "Basa los datos en el texto de referencia; no inventes cifras ni fechas.\n"
-              'Responde SOLO JSON con este formato: {"diapositivas":[{"titulo":"...","puntos":["..."],"notas":"...","imagen":"..."}]}\n\n'
-              f"Texto de referencia:\n{texto[:12000]}")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    r = requests.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-                      json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}}, timeout=60)
-    r.raise_for_status()
-    crudo = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    datos = json.loads(crudo)
-    return [{"titulo": str(s["titulo"]), "puntos": [str(p) for p in s["puntos"]][:6], "notas": str(s.get("notas", "")), "imagen": str(s.get("imagen", "") or tema)} for s in datos["diapositivas"] if s.get("titulo") and s.get("puntos")]
-
-# -------------------------------------------------------------- archivo .pptx
-def _rgb(hex_):
-    return RGBColor.from_string(hex_)
-
-def _rect(slide, x, y, w, h, color):
-    forma = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, w, h)
-    forma.fill.solid()
-    forma.fill.fore_color.rgb = _rgb(color)
-    forma.line.fill.background()
-    return forma
-
-def _texto(slide, x, y, w, h, texto, size, color, bold=False, align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.TOP):
-    caja = slide.shapes.add_textbox(x, y, w, h)
-    tf = caja.text_frame
+def barra_titulo(prs, slide, texto):
+    from pptx.enum.shapes import MSO_SHAPE
+    barra = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, Inches(1.2))
+    barra.fill.solid()
+    barra.fill.fore_color.rgb = AZUL
+    barra.line.fill.background()
+    tf = slide.shapes.add_textbox(Inches(0.5), Inches(0.15), Inches(12.3), Inches(0.9)).text_frame
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
     tf.word_wrap = True
-    tf.vertical_anchor = anchor
     p = tf.paragraphs[0]
-    p.alignment = align
-    run = p.add_run()
-    run.text = texto
-    run.font.size = Pt(size)
-    run.font.bold = bold
-    run.font.name = "Calibri"
-    run.font.color.rgb = _rgb(color)
-    return caja
+    p.text = texto
+    p.font.size = Pt(30)
+    p.font.bold = True
+    p.font.color.rgb = BLANCO
 
-def _poner_imagen(slide, datos, x, y, w_max, h_max):
-    iw, ih = Image.open(io.BytesIO(datos)).size
-    escala = min(w_max / iw, h_max / ih)
-    w, h = int(iw * escala), int(ih * escala)
-    slide.shapes.add_picture(io.BytesIO(datos), int(x + (w_max - w) / 2), int(y + (h_max - h) / 2), w, h)
 
-def _notas(slide, texto):
-    if texto:
-        slide.notes_slide.notes_text_frame.text = texto
+def poner_imagen(slide, img, x, y, max_w, max_h):
+    from PIL import Image
+    flujo = descargar_imagen(img["url"])
+    if not flujo:
+        return False
+    try:
+        w, h = Image.open(flujo).size
+        flujo.seek(0)
+        escala = min(max_w / w, max_h / h)
+        ancho, alto = int(w * escala), int(h * escala)
+        slide.shapes.add_picture(flujo, x + (max_w - ancho) // 2, y, width=ancho, height=alto)
+        cap = slide.shapes.add_textbox(x, y + alto + Inches(0.05), max_w, Inches(0.4)).text_frame
+        cap.word_wrap = True
+        cap.paragraphs[0].text = f"Imagen: {img['autor']}"
+        cap.paragraphs[0].font.size = Pt(10)
+        cap.paragraphs[0].font.color.rgb = RGBColor(0x77, 0x77, 0x77)
+        return True
+    except Exception:
+        return False
 
-def crear_pptx(titulo, slides, fuente_url, tema_color, portada=None, con_notas=True, videos=None):
-    oscuro, acento, claro = TEMAS.get(tema_color, TEMAS["azul"])
+
+def construir_pptx(tema, slides, fuentes, portada, incluir_yt):
     prs = Presentation()
     prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
-    W, H = prs.slide_width, prs.slide_height
     vacio = prs.slide_layouts[6]
-    creditos = []
 
     # Portada
     s = prs.slides.add_slide(vacio)
-    _rect(s, 0, 0, W, H, oscuro)
-    ancho_titulo = Inches(7.2) if portada else Inches(11.5)
-    _rect(s, Inches(0.8), Inches(3.55), Inches(1.6), Emu(60000), acento)
-    _texto(s, Inches(0.8), Inches(1.8), ancho_titulo, Inches(1.7), titulo, 44 if portada else 48, "FFFFFF", bold=True, anchor=MSO_ANCHOR.BOTTOM)
-    _texto(s, Inches(0.8), Inches(3.8), Inches(6), Inches(0.8), time.strftime("%d/%m/%Y"), 18, "C9D6E8")
+    fondo = s.background.fill
+    fondo.solid()
+    fondo.fore_color.rgb = AZUL
+    tf = s.shapes.add_textbox(Inches(0.7), Inches(2.3), Inches(7), Inches(2.5)).text_frame
+    tf.word_wrap = True
+    tf.paragraphs[0].text = tema
+    tf.paragraphs[0].font.size = Pt(44)
+    tf.paragraphs[0].font.bold = True
+    tf.paragraphs[0].font.color.rgb = BLANCO
     if portada:
-        _poner_imagen(s, portada["datos"], Inches(8.4), Inches(1.2), Inches(4.4), Inches(5.1))
-        creditos.append(portada["credito"])
-    if con_notas:
-        _notas(s, f"Presentación sobre {titulo}. Fuente principal: {fuente_url}")
+        poner_imagen(s, portada, Inches(8), Inches(1.5), Inches(4.8), Inches(4.5))
 
     # Contenido
-    for n, d in enumerate(slides, start=1):
+    for d in slides:
         s = prs.slides.add_slide(vacio)
-        _rect(s, 0, 0, W, H, claro)
-        _rect(s, 0, 0, W, Inches(1.35), oscuro)
-        _rect(s, 0, Inches(1.35), W, Emu(50000), acento)
-        _texto(s, Inches(0.7), 0, Inches(11.9), Inches(1.35), d["titulo"], 30, "FFFFFF", bold=True, anchor=MSO_ANCHOR.MIDDLE)
-        imagen = d.get("imagen_datos")
-        ancho_texto = Inches(6.9) if imagen else Inches(11.5)
-        caja = s.shapes.add_textbox(Inches(0.9), Inches(1.9), ancho_texto, Inches(4.8))
-        tf = caja.text_frame
+        barra_titulo(prs, s, d["titulo"])
+        con_img = bool(d["imagen"])
+        ancho_txt = Inches(7.4) if con_img else Inches(12.3)
+        tf = s.shapes.add_textbox(Inches(0.5), Inches(1.5), ancho_txt, Inches(5.5)).text_frame
         tf.word_wrap = True
-        tamano = (22 if len(d["puntos"]) <= 4 else 19) if imagen else (24 if len(d["puntos"]) <= 4 else 21)
         for i, punto in enumerate(d["puntos"]):
             p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            p.space_after = Pt(14)
-            marca = p.add_run()
-            marca.text = "●  "
-            marca.font.size = Pt(tamano - 8)
-            marca.font.color.rgb = _rgb(acento)
-            run = p.add_run()
-            run.text = punto
-            run.font.size = Pt(tamano)
-            run.font.name = "Calibri"
-            run.font.color.rgb = _rgb("222222")
-        if imagen:
-            _poner_imagen(s, imagen, Inches(8.2), Inches(1.9), Inches(4.5), Inches(4.7))
-            creditos.append(d["credito"])
-        _texto(s, Inches(11.8), Inches(6.9), Inches(1.2), Inches(0.4), str(n), 12, "888888", align=PP_ALIGN.RIGHT)
-        if con_notas:
-            _notas(s, d.get("notas", ""))
+            p.text = "• " + punto
+            p.font.size = Pt(18)
+            p.font.color.rgb = GRIS
+            p.space_after = Pt(12)
+        if con_img:
+            if not poner_imagen(s, d["imagen"], Inches(8.2), Inches(1.6), Inches(4.7), Inches(4.8)):
+                pass
 
-    # Diapositiva de Videos (CORREGIDO - URLs Visibles)
-    if videos:
-        s_vid = prs.slides.add_slide(vacio)
-        _rect(s_vid, 0, 0, W, H, oscuro)
-        _texto(s_vid, Inches(0.8), Inches(0.6), Inches(11.5), Inches(0.9), "📺 Videos Recomendados", 36, "FFFFFF", bold=True)
-        _texto(s_vid, Inches(0.8), Inches(1.6), Inches(11.5), Inches(0.5), "Copia estos enlaces para ver más sobre el tema:", 18, "C9D6E8")
-        
-        y_pos = Inches(2.4)
-        for i, v in enumerate(videos, 1):
-            # Título del video
-            caja_titulo = s_vid.shapes.add_textbox(Inches(0.8), y_pos, Inches(11.5), Inches(0.5))
-            tf_titulo = caja_titulo.text_frame
-            tf_titulo.word_wrap = True
-            p_titulo = tf_titulo.paragraphs[0]
-            run_titulo = p_titulo.add_run()
-            run_titulo.text = f"{i}. {v['titulo']}"
-            run_titulo.font.size = Pt(16)
-            run_titulo.font.color.rgb = _rgb("FFFFFF")
-            run_titulo.font.bold = True
-            
-            # URL visible y clickable (formato corto)
-            y_pos += Inches(0.55)
-            caja_url = s_vid.shapes.add_textbox(Inches(1.2), y_pos, Inches(11.1), Inches(0.4))
-            tf_url = caja_url.text_frame
-            tf_url.word_wrap = True
-            p_url = tf_url.paragraphs[0]
-            run_url = p_url.add_run()
-            # Usamos URL corta de YouTube para que quepa mejor
-            run_url.text = f"   🔗 https://youtu.be/{v['id']}"
-            run_url.font.size = Pt(14)
-            run_url.font.color.rgb = _rgb("2E86DE") # Azul brillante
-            
-            y_pos += Inches(0.9)
-
-    # Fuentes y créditos
+    # Fuentes
     s = prs.slides.add_slide(vacio)
-    _rect(s, 0, 0, W, H, oscuro)
-    _texto(s, Inches(0.8), Inches(0.6), Inches(11.5), Inches(0.9), "Fuentes", 36, "FFFFFF", bold=True)
-    _texto(s, Inches(0.8), Inches(1.6), Inches(11.5), Inches(0.7), fuente_url or "—", 18, "C9D6E8")
-    if creditos:
-        _texto(s, Inches(0.8), Inches(2.6), Inches(11.5), Inches(0.5), "Imágenes (Wikimedia Commons)", 18, "FFFFFF", bold=True)
-        caja = s.shapes.add_textbox(Inches(0.8), Inches(3.15), Inches(11.8), Inches(4))
-        tf = caja.text_frame
+    barra_titulo(prs, s, "Fuentes y referencias")
+    tf = s.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(12.3), Inches(5.6)).text_frame
+    tf.word_wrap = True
+    vistos, i = set(), 0
+    for f in fuentes:
+        clave = (f["nombre"], f["url"])
+        if clave in vistos or i >= 12:
+            continue
+        vistos.add(clave)
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.text = f"{f['nombre']}" + (f" — {f['url']}" if f["url"] else "")
+        p.font.size = Pt(12)
+        p.font.color.rgb = GRIS
+        i += 1
+
+    if incluir_yt:
+        s = prs.slides.add_slide(vacio)
+        barra_titulo(prs, s, "Videos recomendados en YouTube")
+        q = tema.replace(" ", "+")
+        tf = s.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(12.3), Inches(4)).text_frame
         tf.word_wrap = True
-        for i, c in enumerate(creditos):
-            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            p.space_after = Pt(3)
-            run = p.add_run()
-            run.text = c
-            run.font.size = Pt(11)
-            run.font.name = "Calibri"
-            run.font.color.rgb = _rgb("C9D6E8")
+        tf.paragraphs[0].text = f"• Explicación del tema: https://www.youtube.com/results?search_query={q}"
+        p = tf.add_paragraph()
+        p.text = f"• Clases y tutoriales: https://www.youtube.com/results?search_query={q}+clase+educativa"
+        for p in tf.paragraphs:
+            p.font.size = Pt(16)
+            p.font.color.rgb = GRIS
+            p.space_after = Pt(12)
 
-    buffer = io.BytesIO()
-    prs.save(buffer)
-    buffer.seek(0)
-    return buffer
+    buf = io.BytesIO()
+    prs.save(buf)
+    buf.seek(0)
+    return buf
 
-def nombre_seguro(texto):
-    limpio = re.sub(r"[^\w\- ]+", "", texto, flags=re.UNICODE).strip().replace(" ", "_")
-    return (limpio or "presentacion")[:60]
 
-# ------------------------------------------------------------------ rutas web
-@app.get("/")
-@login_required
-def inicio():
-    return render_template("index.html", con_ia=bool(GEMINI_API_KEY), es_windows=platform.system() == "Windows", temas=list(TEMAS), usuario=current_user)
+# =====================================================================
+#  INTERFAZ
+# =====================================================================
+def pantalla_generador():
+    st.markdown(
+        '<div class="plani-hero"><b>🎓 Crea tu presentación</b>'
+        "<p>Escribe un tema y la app reunirá información verificable de varias fuentes, "
+        "con imágenes relacionadas y una diapositiva de referencias.</p></div>",
+        unsafe_allow_html=True,
+    )
 
-@app.get("/salud")
-def salud():
-    return "ok"
+    with st.form("form_presentacion"):
+        tema = st.text_input("Tema, asignatura o concepto", "La fotosíntesis")
+        c1, c2 = st.columns(2)
+        with c1:
+            num_slides = st.slider("Diapositivas de contenido", 3, 10, 6)
+        with c2:
+            incluir_yt = st.checkbox("Incluir enlaces de YouTube", value=True)
+        generar = st.form_submit_button("🚀 Generar presentación")
 
-@app.route("/login", methods=['GET', 'POST'])
-def login():
-    if current_user.is_authenticated:
-        return redirect(url_for('inicio'))
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        user = User.query.filter_by(username=username).first()
-        if user and check_password_hash(user.password_hash, password):
-            login_user(user)
-            return redirect(url_for('inicio'))
-        else:
-            flash('Usuario o contraseña incorrectos', 'error')
-    return render_template('login.html')
-
-@app.get("/logout")
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for('login'))
-
-@app.route("/admin/crear-usuario", methods=['GET', 'POST'])
-@login_required
-def crear_usuario():
-    if not current_user.is_admin:
-        flash('No tienes permisos de administrador', 'error')
-        return redirect(url_for('inicio'))
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        is_admin = request.form.get('is_admin') == 'on'
-        if User.query.filter_by(username=username).first():
-            flash('El usuario ya existe', 'error')
-        else:
-            new_user = User(username=username, password_hash=generate_password_hash(password), is_admin=is_admin)
-            db.session.add(new_user)
-            db.session.commit()
-            flash(f'Usuario "{username}" creado exitosamente', 'success')
-    return render_template('admin.html')
-
-@app.post("/generar")
-@login_required
-def generar():
-    if not registrar_uso(current_user):
-        return jsonify(error=f"Llegaste al límite de {LIMITE_DIARIO} presentaciones por hoy. Vuelve mañana."), 429
-
-    datos = request.get_json(force=True, silent=True) or {}
-    tema = (datos.get("tema") or "").strip()[:150]
-    try:
-        cantidad = max(3, min(int(datos.get("cantidad") or 6), 12))
-    except (TypeError, ValueError):
-        cantidad = 6
-
-    idioma = datos.get("idioma") if datos.get("idioma") in ("es", "en") else "es"
-    color = datos.get("color", "azul")
-    abrir = bool(datos.get("abrir"))
-    con_imagenes = bool(datos.get("imagenes", True))
-    con_notas = bool(datos.get("notas", True))
-    
-    if not tema:
-        return jsonify(error="Escribe un tema."), 400
-
-    # LÓGICA DE BÚSQUEDA HÍBRIDA INTELIGENTE
-    # 1. Intentar DuckDuckGo primero
-    encontrado = buscar_duckduckgo(tema, idioma)
-    fuente_actual = "DuckDuckGo (Web Actual)"
-    
-    # 2. Si DDG falla, intentar Wikipedia ANTES de dar error
-    if not encontrado:
-        encontrado = buscar_wikipedia(tema, idioma)
-        fuente_actual = "Wikipedia"
-
-    # 3. Si ambas fallan, entonces sí damos error
-    if not encontrado:
-        return jsonify(error="No encontré información suficiente sobre ese tema en ninguna fuente."), 404
-        
-    titulo, texto, url = encontrado
-
-    # BUSCAR VIDEOS DE YOUTUBE
-    videos = buscar_videos_youtube(tema, max_results=3)
-
-    slides, avisos = [], []
-    if GEMINI_API_KEY:
+    if generar:
+        if not tema.strip():
+            st.warning("Escribe un tema válido.")
+            return
         try:
-            slides = diapositivas_con_gemini(titulo, texto, cantidad, idioma)
-        except Exception as e:
-            avisos.append(f"La IA no respondió ({type(e).__name__}); usé solo {fuente_actual}.")
-    if not slides:
-        slides = diapositivas_desde_texto(titulo, texto, cantidad)
-    if not slides:
-        return jsonify(error="El artículo es muy corto para armar diapositivas."), 422
-
-    portada = None
-    if con_imagenes:
-        usadas = set()
-        portada = buscar_imagen(titulo, usadas)
-        sin_imagen = 0
-        for d in slides:
-            img = buscar_imagen(d.get("imagen") or titulo, usadas) or buscar_imagen(titulo, usadas)
-            if img:
-                d["imagen_datos"], d["credito"] = img["datos"], img["credito"]
+            with st.spinner("Reuniendo información e imágenes..."):
+                resultado = recopilar(tema.strip(), num_slides)
+            if not resultado[0]:
+                st.error("No encontré información suficiente sobre ese tema. Prueba con otra redacción.")
             else:
-                sin_imagen += 1
-        if sin_imagen:
-            avisos.append(f"No encontré imagen para {sin_imagen} diapositiva(s).")
-    aviso = " ".join(avisos) or None
+                slides, fuentes, portada = resultado
+                with st.spinner("Armando el PowerPoint..."):
+                    archivo = construir_pptx(tema.strip(), slides, fuentes, portada, incluir_yt)
+                st.success(f"Presentación lista: {len(slides)} diapositivas de contenido.")
+                st.download_button(
+                    "📥 Descargar (.pptx)",
+                    data=archivo,
+                    file_name=f"{tema.strip().replace(' ', '_')}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+        except Exception as err:
+            st.error(f"Ocurrió un error: {err}")
 
-    archivo = crear_pptx(titulo, slides, url, color, portada=portada, con_notas=con_notas, videos=videos)
-    nombre = nombre_seguro(titulo) + ".pptx"
 
-    if abrir and platform.system() == "Windows" and request.remote_addr in ("127.0.0.1", "::1"):
-        ruta = os.path.join(tempfile.gettempdir(), nombre)
-        with open(ruta, "wb") as f:
-            f.write(archivo.getvalue())
-        os.startfile(ruta)
-        return jsonify(ok=True, abierto=True, archivo=ruta, aviso=aviso, diapositivas=len(slides))
+# =====================================================================
+#  ENRUTADOR
+# =====================================================================
+if not st.session_state.get("autenticado"):
+    pantalla_login()
+    st.stop()
 
-    resp = send_file(archivo, as_attachment=True, download_name=nombre, mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation")
-    if aviso:
-        resp.headers["X-Aviso"] = aviso.encode("latin-1", "ignore").decode("latin-1")
-    return resp
+st.markdown(ESTILO_BASE + ESTILO_APP, unsafe_allow_html=True)
+banner()
+sidebar_usuario()
+if st.sidebar.button("Cerrar sesión"):
+    for k in ("autenticado", "usuario", "rol", "nombre"):
+        st.session_state.pop(k, None)
+    st.rerun()
+cambiar_mi_clave()
 
-# Inicializar base de datos y crear admin automáticamente
-with app.app_context():
-    db.create_all()
-    admin_user = User.query.filter_by(username='admin').first()
-    if not admin_user:
-        admin_user = User(username='admin', password_hash=generate_password_hash('admin123'), is_admin=True)
-        db.session.add(admin_user)
-        db.session.commit()
-        print("=" * 50)
-        print("✅ Usuario admin creado automáticamente")
-        print(" Usuario: admin | 🔑 Contraseña: admin123")
-        print("=" * 50)
-    else:
-        print("✅ El usuario admin ya existe")
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    print(f"Abre http://127.0.0.1:{port} en tu navegador")
-    app.run(host="0.0.0.0", port=port, debug=False)
+if st.session_state.get("rol") == "admin":
+    tab_gen, tab_admin = st.tabs(["🎓 Generar presentación", "👥 Administrar usuarios"])
+    with tab_gen:
+        pantalla_generador()
+    with tab_admin:
+        panel_admin()
+else:
+    pantalla_generador()
